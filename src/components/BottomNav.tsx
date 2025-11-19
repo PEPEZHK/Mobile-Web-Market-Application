@@ -1,13 +1,16 @@
 import { NavLink } from "@/components/NavLink";
-import { Package, ShoppingCart, Users, History, Settings } from "lucide-react";
+import { Package, ShoppingCart, Users, History, Settings, ClipboardList } from "lucide-react";
+import { useTranslation } from "@/hooks/useTranslation";
 
 export function BottomNav() {
+  const { t } = useTranslation();
   const navItems = [
-    { to: "/", icon: Package, label: "Depot" },
-    { to: "/sales", icon: ShoppingCart, label: "Sales" },
-    { to: "/customers", icon: Users, label: "Customers" },
-    { to: "/history", icon: History, label: "History" },
-    { to: "/settings", icon: Settings, label: "Settings" },
+    { to: "/", icon: Package, labelKey: "nav.depot" },
+    { to: "/sales", icon: ShoppingCart, labelKey: "nav.sales" },
+    { to: "/customers", icon: Users, labelKey: "nav.customers" },
+    { to: "/shopping-list", icon: ClipboardList, labelKey: "nav.shopping" },
+    { to: "/history", icon: History, labelKey: "nav.history" },
+    { to: "/settings", icon: Settings, labelKey: "nav.settings" },
   ];
 
   return (
@@ -22,7 +25,7 @@ export function BottomNav() {
             activeClassName="text-primary font-medium"
           >
             <item.icon className="h-5 w-5 mb-1" />
-            <span className="text-xs">{item.label}</span>
+            <span className="text-xs">{t(item.labelKey)}</span>
           </NavLink>
         ))}
       </div>
