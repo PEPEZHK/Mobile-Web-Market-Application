@@ -5,7 +5,11 @@
     "scheme": "offlinestock",
     "version": "1.0.0",
     "orientation": "portrait",
-    "platforms": ["ios", "android", "web"],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",
     "splash": {
@@ -29,6 +33,12 @@
     "web": {
       "bundler": "metro",
       "output": "single"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "04119a10-9482-44f6-9a92-d6834cecb4f5"
+      }
+    },
+    "owner": "pepezhka"
   }
 }
