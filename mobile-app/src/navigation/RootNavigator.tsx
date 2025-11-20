@@ -6,6 +6,7 @@ import LoginScreen from '../screens/LoginScreen';
 import ProductFormScreen from '../screens/ProductFormScreen';
 import ShoppingListFormScreen from '../screens/ShoppingListFormScreen';
 import ShoppingListDetailScreen from '../screens/ShoppingListDetailScreen';
+import HistoryScreen from '../screens/HistoryScreen';
 import FullScreenLoader from '../components/FullScreenLoader';
 import { useDatabase } from '../hooks/useDatabase';
 import { useAuth } from '../hooks/useAuth';
@@ -45,6 +46,11 @@ const RootNavigator = () => {
             name="ShoppingListDetail"
             component={ShoppingListDetailScreen}
             options={({ route }) => ({ title: route.params.title })}
+          />
+          <Stack.Screen
+            name="History"
+            component={HistoryScreen}
+            options={{ title: 'Sales history' }}
           />
         </>
       ) : (

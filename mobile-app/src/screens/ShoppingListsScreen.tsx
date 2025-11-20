@@ -13,12 +13,17 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { fetchShoppingLists } from '../storage/database';
 import type { ShoppingListWithStats } from '../types';
 import type { RootStackParamList } from '../navigation/types';
+import TopBar from '../components/TopBar';
+import { useTheme } from '../hooks/useTheme';
+import { useTranslation } from '../hooks/useTranslation';
 
 const ShoppingListsScreen = () => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [lists, setLists] = useState<ShoppingListWithStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const { colors } = useTheme();
+  const { t } = useTranslation();
 
   const loadLists = useCallback(async () => {
     setLoading(true);
@@ -44,8 +49,9 @@ const ShoppingListsScreen = () => {
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.heading}>Shopping lists</Text>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      <TopBar />
+      <Text style={[styles.heading, { color: colors.text }]}>{t('shopping.title', { defaultValue: 'Shopping lists' })}</Text>
       {loading ? (
         <View style={styles.loader}>
           <ActivityIndicator />

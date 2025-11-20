@@ -14,6 +14,9 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { adjustProductQuantity, fetchProducts } from '../storage/database';
 import type { Product } from '../types';
+import TopBar from '../components/TopBar';
+import { useTheme } from '../hooks/useTheme';
+import { useTranslation } from '../hooks/useTranslation';
 
 const InventoryScreen = () => {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -21,6 +24,8 @@ const InventoryScreen = () => {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const { colors } = useTheme();
+  const { t } = useTranslation();
 
   const loadProducts = useCallback(async () => {
     setLoading(true);
@@ -64,11 +69,13 @@ const InventoryScreen = () => {
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.heading}>Inventory</Text>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      <TopBar />
+      <Text style={[styles.heading, { color: colors.text }]}>{t('inventory.title', { defaultValue: 'Inventory' })}</Text>
       <TextInput
-        placeholder="Search by name or barcode"
-        style={styles.search}
+        placeholder={t('inventory.search', { defaultValue: 'Search by name or barcode' })}
+        placeholderTextColor={colors.muted}
+        style={[styles.search, { borderColor: colors.border, color: colors.text, backgroundColor: colors.input }]}
         value={search}
         onChangeText={setSearch}
       />
@@ -82,35 +89,37 @@ const InventoryScreen = () => {
           keyExtractor={(item) => String(item.id)}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           renderItem={({ item }) => (
-            <View style={styles.card}>
+            <View style={[styles.card, { backgroundColor: colors.card, shadowColor: colors.text + '22' }]}>
               <View style={styles.cardHeader}>
                 <View>
-                  <Text style={styles.cardTitle}>{item.name}</Text>
-                  <Text style={styles.cardMeta}>{item.category || 'Uncategorized'}</Text>
+                  <Text style={[styles.cardTitle, { color: colors.text }]}>{item.name}</Text>
+                  <Text style={[styles.cardMeta, { color: colors.muted }]}>{item.category || t('shopping.form.customerUnassigned', { defaultValue: 'Uncategorized' })}</Text>
                 </View>
-                <Text style={[styles.quantity, item.quantity <= item.min_stock && styles.lowStock]}>
-                  {item.quantity} pcs
+                <Text style={[styles.quantity, { color: colors.text }, item.quantity <= item.min_stock && { color: colors.danger }]}>
+                  {item.quantity} {t('depot.stock', { defaultValue: 'pcs' })}
                 </Text>
               </View>
               <View style={styles.cardFooter}>
-                <Text style={styles.price}>Sell: ${item.sell_price?.toFixed(2)}</Text>
+                <Text style={[styles.price, { color: colors.text }]}>
+                  {t('depot.price.sell', { defaultValue: 'Sell:' })} ${item.sell_price?.toFixed(2)}
+                </Text>
                 <View style={styles.actions}>
                   <TouchableOpacity style={styles.adjustButton} onPress={() => handleAdjust(item.id, -1)}>
-                    <Text style={styles.adjustText}>-</Text>
+                    <Text style={[styles.adjustText, { color: colors.text }]}>-</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={styles.adjustButton} onPress={() => handleAdjust(item.id, 1)}>
-                    <Text style={styles.adjustText}>+</Text>
+                    <Text style={[styles.adjustText, { color: colors.text }]}>+</Text>
                   </TouchableOpacity>
                 </View>
               </View>
             </View>
           )}
-          ListEmptyComponent={<Text style={styles.empty}>No products yet. Add your first item.</Text>}
+          ListEmptyComponent={<Text style={[styles.empty, { color: colors.muted }]}>{t('inventory.empty', { defaultValue: 'No products yet. Add your first item.' })}</Text>}
           contentContainerStyle={filtered.length === 0 ? styles.emptyContainer : undefined}
         />
       )}
       <TouchableOpacity
-        style={styles.fab}
+        style={[styles.fab, { backgroundColor: colors.primary, shadowColor: colors.text }]}
         onPress={() => navigation.navigate('ProductForm')}
       >
         <Text style={styles.fabText}>＋</Text>
