@@ -18,6 +18,28 @@ export interface Customer {
   created_at: string;
 }
 
+export interface Transaction {
+  id: number;
+  date: string;
+  customer_id: number | null;
+  total_amount: number;
+  payment_status: 'debt' | 'fully_paid';
+}
+
+export interface TransactionItem {
+  id: number;
+  transaction_id: number;
+  product_id: number;
+  quantity: number;
+  unit_price: number;
+  line_total: number;
+}
+
+export interface CartItem {
+  product: Product;
+  quantity: number;
+}
+
 export interface ShoppingList {
   id: number;
   title: string;

@@ -19,6 +19,9 @@ import {
 } from '../storage/database';
 import type { ShoppingList, ShoppingListItemWithProduct } from '../types';
 import { useFocusEffect } from '@react-navigation/native';
+import TopBar from '../components/TopBar';
+import { useTheme } from '../hooks/useTheme';
+import { useTranslation } from '../hooks/useTranslation';
 
 const ShoppingListDetailScreen = ({ route }: NativeStackScreenProps<RootStackParamList, 'ShoppingListDetail'>) => {
   const { listId } = route.params;
@@ -29,6 +32,8 @@ const ShoppingListDetailScreen = ({ route }: NativeStackScreenProps<RootStackPar
   const [quantity, setQuantity] = useState('1');
   const [estimated, setEstimated] = useState('0');
   const [saving, setSaving] = useState(false);
+  const { colors } = useTheme();
+  const { t } = useTranslation();
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -82,14 +87,15 @@ const ShoppingListDetailScreen = ({ route }: NativeStackScreenProps<RootStackPar
 
   if (loading) {
     return (
-      <View style={styles.loader}>
+      <View style={[styles.loader, { backgroundColor: colors.background }]}>
         <ActivityIndicator />
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      <TopBar />
       {list && (
         <View style={styles.meta}>
           <Text style={styles.metaTitle}>{list.title}</Text>

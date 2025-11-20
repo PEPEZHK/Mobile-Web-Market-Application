@@ -5,7 +5,9 @@ import type {
   ShoppingList,
   ShoppingListWithStats,
   ShoppingListItemWithProduct,
-  User
+  User,
+  Customer,
+  Transaction
 } from '../types';
 
 const DB_NAME = 'offline-stock.db';
@@ -205,6 +207,36 @@ export interface ProductInput {
   min_stock?: number;
 }
 
+export interface CustomerInput {
+  name: string;
+  phone?: string;
+  notes?: string;
+}
+
+export interface TransactionLineInput {
+  productId: number;
+  quantity: number;
+  unitPrice: number;
+}
+
+export interface TransactionInput {
+  customerId: number;
+  paymentStatus: 'fully_paid' | 'debt';
+  items: TransactionLineInput[];
+}
+
+export interface TransactionItemDetail {
+  product_name: string;
+  quantity: number;
+  unit_price: number;
+  line_total: number;
+}
+
+export interface TransactionWithDetails extends Transaction {
+  customer_name: string | null;
+  items: TransactionItemDetail[];
+}
+
 export async function fetchProducts(): Promise<Product[]> {
   const db = await initDatabase();
   return db.getAllAsync<Product>(
@@ -235,6 +267,188 @@ export async function adjustProductQuantity(productId: number, delta: number) {
   await db.runAsync(
     `UPDATE products SET quantity = MAX(quantity + ?, 0) WHERE id = ?;`,
     [delta, productId]
+  );
+}
+
+export async function fetchCustomers(): Promise<Customer[]> {
+  const db = await initDatabase();
+  return db.getAllAsync<Customer>(
+    `SELECT * FROM customers ORDER BY name COLLATE NOCASE;`
+  );
+}
+
+export async function createCustomer(input: CustomerInput) {
+  const db = await initDatabase();
+  const result = await db.runAsync(
+    `INSERT INTO customers (name, phone, notes) VALUES (?, ?, ?);`,
+    [input.name.trim(), input.phone || null, input.notes || null]
+  );
+  return result.lastInsertRowId as number;
+}
+
+export async function updateCustomer(id: number, input: CustomerInput) {
+  const db = await initDatabase();
+  await db.runAsync(
+    `UPDATE customers SET name = ?, phone = ?, notes = ? WHERE id = ?;`,
+    [input.name.trim(), input.phone || null, input.notes || null, id]
+  );
+}
+
+export async function deleteCustomer(id: number) {
+  const db = await initDatabase();
+  await db.execAsync('BEGIN;');
+  try {
+    await db.runAsync(
+      `DELETE FROM transaction_items WHERE transaction_id IN (SELECT id FROM transactions WHERE customer_id = ?);`,
+      [id]
+    );
+    await db.runAsync(`DELETE FROM transactions WHERE customer_id = ?;`, [id]);
+    await db.runAsync(`UPDATE shopping_lists SET customer_id = NULL WHERE customer_id = ?;`, [id]);
+    await db.runAsync(`DELETE FROM customers WHERE id = ?;`, [id]);
+    await db.execAsync('COMMIT;');
+  } catch (error) {
+    await db.execAsync('ROLLBACK;');
+    throw error;
+  }
+}
+
+export async function fetchSalesSummary() {
+  const db = await initDatabase();
+  return db.getFirstAsync<{ total: number; paid: number; debt: number }>(
+    `SELECT
+      COALESCE(SUM(total_amount), 0) as total,
+      COALESCE(SUM(CASE WHEN payment_status = 'fully_paid' THEN total_amount ELSE 0 END), 0) as paid,
+      COALESCE(SUM(CASE WHEN payment_status = 'debt' THEN total_amount ELSE 0 END), 0) as debt
+    FROM transactions;`
+  );
+}
+
+export async function fetchCustomerSummary(customerId: number) {
+  const db = await initDatabase();
+  return db.getFirstAsync<{ total: number; paid: number; debt: number }>(
+    `SELECT
+      COALESCE(SUM(total_amount), 0) as total,
+      COALESCE(SUM(CASE WHEN payment_status = 'fully_paid' THEN total_amount ELSE 0 END), 0) as paid,
+      COALESCE(SUM(CASE WHEN payment_status = 'debt' THEN total_amount ELSE 0 END), 0) as debt
+    FROM transactions
+    WHERE customer_id = ?;`,
+    [customerId]
+  );
+}
+
+export async function createTransaction(input: TransactionInput) {
+  if (input.items.length === 0) {
+    throw new Error('Cart is empty.');
+  }
+
+  const db = await initDatabase();
+  const total = input.items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
+
+  await db.execAsync('BEGIN;');
+
+  try {
+    const insertTx = await db.runAsync(
+      `INSERT INTO transactions (customer_id, total_amount, payment_status)
+       VALUES (?, ?, ?);`,
+      [input.customerId, total, input.paymentStatus]
+    );
+
+    const transactionId = insertTx.lastInsertRowId as number;
+
+    for (const line of input.items) {
+      const product = await db.getFirstAsync<{ quantity: number; name: string }>(
+        `SELECT quantity, name FROM products WHERE id = ? LIMIT 1;`,
+        [line.productId]
+      );
+
+      if (!product) {
+        throw new Error('Product not found.');
+      }
+
+      if (line.quantity > product.quantity) {
+        throw new Error(`Not enough stock for ${product.name}.`);
+      }
+
+      const lineTotal = line.unitPrice * line.quantity;
+      await db.runAsync(
+        `INSERT INTO transaction_items (transaction_id, product_id, quantity, unit_price, line_total)
+         VALUES (?, ?, ?, ?, ?);`,
+        [transactionId, line.productId, line.quantity, line.unitPrice, lineTotal]
+      );
+
+      await db.runAsync(
+        `UPDATE products SET quantity = MAX(quantity - ?, 0) WHERE id = ?;`,
+        [line.quantity, line.productId]
+      );
+    }
+
+    await db.execAsync('COMMIT;');
+    return transactionId;
+  } catch (error) {
+    await db.execAsync('ROLLBACK;');
+    throw error;
+  }
+}
+
+export async function fetchTransactionsWithItems(
+  customerId?: number
+): Promise<TransactionWithDetails[]> {
+  const db = await initDatabase();
+  const whereClause = typeof customerId === 'number' ? 'WHERE t.customer_id = ?' : '';
+  const params = typeof customerId === 'number' ? [customerId] : [];
+
+  const baseRows = await db.getAllAsync<Transaction & { customer_name: string | null }>(
+    `SELECT
+      t.id,
+      t.date,
+      t.customer_id,
+      t.total_amount,
+      t.payment_status,
+      c.name AS customer_name
+    FROM transactions t
+    LEFT JOIN customers c ON c.id = t.customer_id
+    ${whereClause}
+    ORDER BY t.date DESC;`,
+    params
+  );
+
+  const transactions: TransactionWithDetails[] = [];
+
+  for (const row of baseRows) {
+    const items = await db.getAllAsync<TransactionItemDetail>(
+      `SELECT
+        p.name AS product_name,
+        ti.quantity,
+        ti.unit_price,
+        ti.line_total
+      FROM transaction_items ti
+      JOIN products p ON p.id = ti.product_id
+      WHERE ti.transaction_id = ?;`,
+      [row.id]
+    );
+
+    transactions.push({
+      ...row,
+      items
+    });
+  }
+
+  return transactions;
+}
+
+export async function toggleTransactionPaymentStatus(transactionId: number) {
+  const db = await initDatabase();
+  const current = await db.getFirstAsync<Transaction>(
+    `SELECT * FROM transactions WHERE id = ?;`,
+    [transactionId]
+  );
+  if (!current) {
+    return;
+  }
+  const nextStatus = current.payment_status === 'fully_paid' ? 'debt' : 'fully_paid';
+  await db.runAsync(
+    `UPDATE transactions SET payment_status = ? WHERE id = ?;`,
+    [nextStatus, transactionId]
   );
 }
 

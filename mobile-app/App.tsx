@@ -5,20 +5,32 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import RootNavigator from './src/navigation/RootNavigator';
 import { DatabaseProvider } from './src/providers/DatabaseProvider';
 import { AuthProvider } from './src/providers/AuthProvider';
+import { LanguageProvider } from './src/contexts/LanguageContext';
+import { ThemeProvider, useThemeContext } from './src/contexts/ThemeContext';
+
+const ThemedNav: React.FC = () => {
+  const { isDark } = useThemeContext();
+  return (
+    <NavigationContainer theme={isDark ? DarkTheme : DefaultTheme}>
+      <RootNavigator />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
+    </NavigationContainer>
+  );
+};
 
 export default function App() {
-  const colorScheme = useColorScheme();
 
   return (
     <SafeAreaProvider>
-      <DatabaseProvider>
-        <AuthProvider>
-          <NavigationContainer theme={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-            <RootNavigator />
-            <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
-          </NavigationContainer>
-        </AuthProvider>
-      </DatabaseProvider>
+      <LanguageProvider>
+        <ThemeProvider>
+          <DatabaseProvider>
+            <AuthProvider>
+              <ThemedNav />
+            </AuthProvider>
+          </DatabaseProvider>
+        </ThemeProvider>
+      </LanguageProvider>
     </SafeAreaProvider>
   );
 }
