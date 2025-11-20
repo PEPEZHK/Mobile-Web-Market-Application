@@ -39,6 +39,9 @@
         "projectId": "04119a10-9482-44f6-9a92-d6834cecb4f5"
       }
     },
-    "owner": "pepezhka"
+    "owner": "pepezhka",
+    "plugins": [
+      "expo-asset"
+    ]
   }
 }
