@@ -1,0 +1,10 @@
+{
+  "appId": "magazin.com.tm",
+  "appName": "magazin",
+  "webDir": "../dist",
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": false
+    }
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">magazin</string>
+    <string name="title_activity_main">magazin</string>
+    <string name="package_name">magazin.com.tm</string>
+    <string name="custom_url_scheme">magazin.com.tm</string>
+</resources>
