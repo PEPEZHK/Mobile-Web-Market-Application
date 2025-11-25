@@ -217,7 +217,7 @@ export default function History() {
 
     await saveExcelUsingShareSheet(finalName, [
       { name: t("history.export.transactionsSheet"), rows }
-    ]);
+    ], { action: "both" });
   };
 
   const computeRange = () => {
@@ -443,7 +443,7 @@ export default function History() {
       { name: t("history.export.summarySheet"), rows: overviewRows },
       { name: t("history.export.transactionsSheet"), rows: detailRows },
       { name: t("history.export.logSheet", { defaultValue: "Log" }), rows: logRows }
-    ]);
+    ], { action: "both" });
 
     toast.success(t("history.toast.summaryExported"));
     setIsSummaryDialogOpen(false);

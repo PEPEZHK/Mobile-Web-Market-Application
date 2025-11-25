@@ -364,7 +364,7 @@ export default function Customers() {
     saveExcelUsingShareSheet(`${customer.name.replace(/[^a-z0-9]/gi, "_")}_${t("customers.export.reportSuffix")}.xls`, [
       { name: t("customers.export.summarySheet"), rows: summaryRows },
       { name: t("customers.export.transactionsSheet"), rows: transactionRows }
-    ]).catch(() => toast.error(t("customers.toast.noExport")));
+    ], { action: "both" }).catch(() => toast.error(t("customers.toast.noExport")));
   };
 
   const exportAllCustomers = () => {
@@ -413,7 +413,7 @@ export default function Customers() {
 
     saveExcelUsingShareSheet(`${t("customers.export.overviewFilename")}.xls`, [
       { name: t("customers.export.overviewSheet"), rows }
-    ]).catch(() => toast.error(t("customers.toast.noExport")));
+    ], { action: "both" }).catch(() => toast.error(t("customers.toast.noExport")));
   };
 
   const filteredCustomers = customers.filter(c =>

@@ -272,7 +272,7 @@ useEffect(() => {
 
     saveExcelUsingShareSheet(`${t("depot.export.filename")}.xls`, [
       { name: t("depot.export.sheetName"), rows }
-    ]).catch(() => toast.error(t("depot.toast.noExport")));
+    ], { action: "both" }).catch(() => toast.error(t("depot.toast.noExport")));
   };
 
   return (

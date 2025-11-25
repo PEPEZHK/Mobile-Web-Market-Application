@@ -590,29 +590,32 @@ export default function Sales() {
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>
               </div>
-              <div className="flex items-center gap-3">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => updateCartQuantity(item.product.id, item.quantity - 1)}
-                >
-                  -
-                </Button>
-                <Input
-                  type="number"
-                  value={item.quantity}
-                  onChange={(e) => updateCartQuantity(item.product.id, parseInt(e.target.value) || 0)}
-                  className="w-20 text-center"
-                  min="1"
-                  max={item.product.quantity}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => updateCartQuantity(item.product.id, item.quantity + 1)}
-                >
-                  +
-                </Button>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateCartQuantity(item.product.id, item.quantity - 1)}
+                  >
+                    -
+                  </Button>
+                  <Input
+                    type="number"
+                    value={item.quantity}
+                    onChange={(e) => updateCartQuantity(item.product.id, parseInt(e.target.value) || 0)}
+                    className="w-20 text-center"
+                    min="1"
+                    max={item.product.quantity}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateCartQuantity(item.product.id, item.quantity + 1)}
+                  >
+                    +
+                  </Button>
+                </div>
+
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-muted-foreground">{t("sales.priceLabel", { defaultValue: "Price" })}</span>
                   <Input
@@ -624,7 +627,8 @@ export default function Sales() {
                     className="w-24 text-center"
                   />
                 </div>
-                <div className="ml-auto text-right">
+
+                <div className="ml-auto text-right w-full sm:w-auto">
                   <div className="font-bold text-lg">
                     {formatCurrency(resolveItemUnitPrice(item) * item.quantity)}
                   </div>

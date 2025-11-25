@@ -699,7 +699,8 @@ export default function ShoppingListDetailPage() {
       [
         { name: t("shopping.detail.export.summarySheet"), rows: summaryRows },
         { name: t("shopping.detail.export.itemsSheet"), rows: itemRows }
-      ]
+      ],
+      { action: "both" }
     ).catch(() => toast.error(t("shopping.detail.toast.listSaveError")));
   };
 

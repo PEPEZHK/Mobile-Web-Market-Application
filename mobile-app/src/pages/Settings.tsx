@@ -7,6 +7,9 @@ import { toast } from "sonner";
 import { useRef } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "@/hooks/useTranslation";
+import { Capacitor } from "@capacitor/core";
+import { Filesystem, Directory } from "@capacitor/filesystem";
+import { Share } from "@capacitor/share";
 
 export default function Settings() {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -17,10 +20,61 @@ export default function Settings() {
   const handleExport = async () => {
     try {
       const jsonData = exportDatabaseAsJSON();
-      const defaultName = window.prompt(
-        t("settings.backup.filenamePrompt", { defaultValue: "Choose a file name for the export" }),
-        `magazin-proekt-backup-${new Date().toISOString().split('T')[0]}.json`
-      ) || `magazin-proekt-backup-${new Date().toISOString().split('T')[0]}.json`;
+      const suggested = `magazin-proekt-backup-${new Date().toISOString().split("T")[0]}.json`;
+      const defaultName =
+        window.prompt(
+          t("settings.backup.filenamePrompt", { defaultValue: "Choose a file name for the export" }),
+          suggested
+        ) || suggested;
+
+      const platform = Capacitor.getPlatform(); // 'ios' | 'android' | 'web'
+
+      // Native path: write to Documents/exports AND share the file
+      if (platform !== "web") {
+        try {
+          if (typeof Filesystem.requestPermissions === "function") {
+            try {
+              await Filesystem.requestPermissions();
+            } catch (permErr) {
+              console.warn("Filesystem permission request failed", permErr);
+            }
+          }
+
+          const filePath = `exports/${defaultName}`;
+          await Filesystem.writeFile({
+            path: filePath,
+            data: jsonData,
+            directory: Directory.Documents,
+            encoding: "utf8",
+            recursive: true,
+          });
+
+          const { uri } = await Filesystem.getUri({
+            path: filePath,
+            directory: Directory.Documents,
+          });
+
+          if (uri) {
+            const canShare = Share.canShare ? await Share.canShare() : { value: true };
+            if (canShare && "value" in canShare && !canShare.value) {
+              throw new Error("Share API not available");
+            }
+
+            await Share.share({
+              title: "Database Backup",
+              text: defaultName,
+              url: uri,
+              dialogTitle: "Share database backup",
+            });
+          }
+
+          toast.success(t("settings.toast.exportSuccess"));
+          return;
+        } catch (nativeErr) {
+          console.warn("Native export failed, falling back to web download", nativeErr);
+          // fall through to web flow
+        }
+      }
 
       type SaveFilePicker = (options?: {
         suggestedName?: string;
