@@ -239,11 +239,12 @@ export function seedSampleData(database: Database): boolean {
         (sum, item) => sum + item.unitPrice * item.quantity,
         0,
       );
+      const paidAmount = transaction.paymentStatus === "fully_paid" ? totalAmount : 0;
 
       database.run(
-        `INSERT INTO transactions (customer_id, total_amount, date, payment_status)
-         VALUES (?, ?, datetime('now', ?), ?)`,
-        [customerId, totalAmount, `${transaction.dateOffset} days`, transaction.paymentStatus],
+        `INSERT INTO transactions (customer_id, total_amount, date, payment_status, paid_amount)
+         VALUES (?, ?, datetime('now', ?), ?, ?)`,
+        [customerId, totalAmount, `${transaction.dateOffset} days`, transaction.paymentStatus, paidAmount],
       );
 
       const txIdResult = database.exec("SELECT last_insert_rowid() as id");

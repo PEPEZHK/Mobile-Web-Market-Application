@@ -19,7 +19,6 @@ import {
   ChevronsUpDown
 } from "lucide-react";
 import { toast } from "sonner";
-import { downloadExcelFile } from "@/lib/excel";
 import { useTranslation } from "@/hooks/useTranslation";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -30,6 +29,8 @@ import {
   CommandItem,
   CommandList
 } from "@/components/ui/command";
+import { formatCurrency } from "@/lib/utils";
+import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
 
 export default function Depot() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -39,6 +40,13 @@ export default function Depot() {
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isCategoryPickerOpen, setIsCategoryPickerOpen] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const now = new Date();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    return `${now.getFullYear()}-${month}`;
+  });
+  const [inventoryTotals, setInventoryTotals] = useState({ buy: 0, sell: 0 });
+  const [monthlySalesTotal, setMonthlySalesTotal] = useState(0);
   const { t } = useTranslation();
 
   const encodeCategory = (value: string) => (value === "" ? "__uncategorized__" : value);
@@ -68,6 +76,35 @@ export default function Depot() {
     setFilteredProducts(filtered);
   }, [products, searchQuery, selectedCategory]);
 
+  const recalculateTotals = useCallback((source?: Product[]) => {
+    const base = source ?? products;
+    const totals = base.reduce(
+      (acc, product) => ({
+        buy: acc.buy + (product.buy_price * product.quantity),
+        sell: acc.sell + (product.sell_price * product.quantity)
+      }),
+      { buy: 0, sell: 0 }
+    );
+    setInventoryTotals(totals);
+  }, [products]);
+
+  const recalculateMonthlySales = useCallback((monthValue?: string) => {
+    const db = getDatabase();
+    const monthFilter = monthValue ?? selectedMonth;
+    if (!monthFilter) {
+      const totalResult = db.exec(`SELECT COALESCE(SUM(total_amount), 0) FROM transactions`);
+      const total = totalResult[0]?.values?.[0]?.[0] as number | undefined;
+      setMonthlySalesTotal(Number(total ?? 0));
+      return;
+    }
+    const result = db.exec(
+      `SELECT COALESCE(SUM(total_amount), 0) FROM transactions WHERE strftime('%Y-%m', date) = ?`,
+      [monthFilter]
+    );
+    const value = result[0]?.values?.[0]?.[0] as number | undefined;
+    setMonthlySalesTotal(Number(value ?? 0));
+  }, [selectedMonth]);
+
   const loadProducts = useCallback(() => {
     const db = getDatabase();
     const result = db.exec('SELECT * FROM products ORDER BY name');
@@ -85,12 +122,16 @@ export default function Depot() {
       }));
       setProducts(prods);
       applyFilters(prods);
+      recalculateTotals(prods);
+      recalculateMonthlySales(selectedMonth);
       return;
     }
 
     setProducts([]);
     setFilteredProducts([]);
-  }, [applyFilters]);
+    recalculateTotals([]);
+    recalculateMonthlySales(selectedMonth);
+  }, [applyFilters, recalculateMonthlySales, recalculateTotals, selectedMonth]);
 
   useEffect(() => {
     if (selectedCategory !== "all" && !categories.includes(selectedCategory)) {
@@ -98,13 +139,17 @@ export default function Depot() {
     }
   }, [categories, selectedCategory]);
 
-  useEffect(() => {
-    loadProducts();
-  }, [loadProducts]);
+useEffect(() => {
+  loadProducts();
+}, [loadProducts]);
 
-  useEffect(() => {
-    applyFilters();
-  }, [applyFilters]);
+useEffect(() => {
+  applyFilters();
+}, [applyFilters]);
+
+useEffect(() => {
+  recalculateMonthlySales(selectedMonth);
+}, [recalculateMonthlySales, selectedMonth]);
 
   const handleSaveProduct = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -219,20 +264,60 @@ export default function Depot() {
         product.barcode || "-",
         product.category || "-",
         product.buy_price,
-        product.sell_price,
-        product.quantity,
-        product.min_stock
-      ]);
-    });
-
-    downloadExcelFile(`${t("depot.export.filename")}.xls`, [
-      { name: t("depot.export.sheetName"), rows }
+      product.sell_price,
+      product.quantity,
+      product.min_stock
     ]);
+  });
+
+    saveExcelUsingShareSheet(`${t("depot.export.filename")}.xls`, [
+      { name: t("depot.export.sheetName"), rows }
+    ]).catch(() => toast.error(t("depot.toast.noExport")));
   };
 
   return (
     <Layout title={t("depot.title")}>
       <div className="space-y-4">
+        <Card className="p-4">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="grid grid-cols-2 gap-4 flex-1">
+              <div>
+                <div className="text-sm text-muted-foreground">{t("depot.totals.buy", { defaultValue: "Total buy" })}</div>
+                <div className="text-2xl font-bold text-foreground">
+                  {formatCurrency(inventoryTotals.buy)}
+                </div>
+              </div>
+              <div>
+                <div className="text-sm text-muted-foreground">{t("depot.totals.sell", { defaultValue: "Total sell" })}</div>
+                <div className="text-2xl font-bold text-primary">
+                  {formatCurrency(inventoryTotals.sell)}
+                </div>
+              </div>
+            </div>
+            <div className="w-full sm:w-64 space-y-2">
+              <Label className="text-sm text-muted-foreground">{t("depot.totals.monthSelector", { defaultValue: "Sales month" })}</Label>
+              <Input
+                type="month"
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full sm:w-auto"
+                onClick={() => setSelectedMonth("")}
+                disabled={!selectedMonth}
+              >
+                {t("depot.totals.clearMonth", { defaultValue: "Show all" })}
+              </Button>
+              <div className="text-sm">
+                {t("depot.totals.monthlySales", { defaultValue: "Sales total" })}:{" "}
+                <span className="font-semibold">{formatCurrency(monthlySalesTotal)}</span>
+              </div>
+            </div>
+          </div>
+        </Card>
+
         <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
           <div className="flex gap-2 flex-1">
             <div className="relative flex-1">
@@ -405,11 +490,11 @@ export default function Depot() {
               <div className="grid grid-cols-2 gap-4 mb-3 text-sm">
                 <div>
                   <span className="text-muted-foreground">{t("depot.price.buy")} </span>
-                  <span className="font-medium">${product.buy_price.toFixed(2)}</span>
+                  <span className="font-medium">{formatCurrency(product.buy_price)}</span>
                 </div>
                 <div>
                   <span className="text-muted-foreground">{t("depot.price.sell")} </span>
-                  <span className="font-medium">${product.sell_price.toFixed(2)}</span>
+                  <span className="font-medium">{formatCurrency(product.sell_price)}</span>
                 </div>
               </div>
 

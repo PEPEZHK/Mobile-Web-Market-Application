@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { Layout } from "@/components/Layout";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -9,18 +9,21 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { getDatabase } from "@/lib/db";
 import { endOfDay, endOfMonth, endOfWeek, endOfYear, format, parseISO, startOfDay, startOfMonth, startOfWeek, startOfYear } from "date-fns";
 import { Receipt, Search, Download } from "lucide-react";
-import { downloadExcelFile } from "@/lib/excel";
+import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
 import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useTranslation } from "@/hooks/useTranslation";
+import { formatCurrency } from "@/lib/utils";
 
 interface TransactionWithDetails {
   id: number;
   date: string;
   customer_name: string | null;
   total_amount: number;
+  paid_amount: number;
+  outstanding: number;
   payment_status: 'fully_paid' | 'debt';
   items: Array<{
     product_name: string;
@@ -30,8 +33,17 @@ interface TransactionWithDetails {
   }>;
 }
 
+interface PaymentLogEntry {
+  id: number;
+  transaction_id: number;
+  amount: number;
+  created_at: string;
+  customer_name: string | null;
+}
+
 export default function History() {
   const [transactions, setTransactions] = useState<TransactionWithDetails[]>([]);
+  const [paymentLogs, setPaymentLogs] = useState<PaymentLogEntry[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSummaryDialogOpen, setIsSummaryDialogOpen] = useState(false);
   const [summaryPeriod, setSummaryPeriod] = useState<'day' | 'week' | 'month' | 'year'>('day');
@@ -44,10 +56,6 @@ export default function History() {
   const [selectedMonth, setSelectedMonth] = useState(() => format(new Date(), 'yyyy-MM'));
   const [selectedYear, setSelectedYear] = useState(() => format(new Date(), 'yyyy'));
   const { t } = useTranslation();
-  const currencyFormatter = useMemo(() => new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: "USD"
-  }), []);
 
   useEffect(() => {
     loadTransactions();
@@ -62,6 +70,7 @@ export default function History() {
         t.date,
         t.total_amount,
         t.payment_status,
+        t.paid_amount,
         c.name as customer_name
       FROM transactions t
       LEFT JOIN customers c ON t.customer_id = c.id
@@ -94,13 +103,34 @@ export default function History() {
           id: transactionId,
           date: row[1] as string,
           total_amount: row[2] as number,
-          payment_status: (row[3] as string) === 'debt' ? 'debt' : 'fully_paid',
-          customer_name: row[4] as string | null,
+          paid_amount: Number(row[4] ?? 0),
+          outstanding: Math.max((row[2] as number) - Number(row[4] ?? 0), 0),
+          payment_status: (row[3] as string) === 'debt' || ((row[2] as number) - Number(row[4] ?? 0)) > 0 ? 'debt' : 'fully_paid',
+          customer_name: row[5] as string | null,
           items
         };
       });
       
       setTransactions(txs);
+
+      const logsResult = db.exec(`
+        SELECT pl.id, pl.transaction_id, pl.amount, pl.created_at, c.name
+        FROM payment_logs pl
+        LEFT JOIN transactions t ON pl.transaction_id = t.id
+        LEFT JOIN customers c ON t.customer_id = c.id
+        ORDER BY datetime(pl.created_at) DESC
+      `);
+
+      const logs: PaymentLogEntry[] = logsResult[0]
+        ? logsResult[0].values.map(row => ({
+            id: row[0] as number,
+            transaction_id: row[1] as number,
+            amount: Number(row[2] ?? 0),
+            created_at: row[3] as string,
+            customer_name: row[4] ? (row[4] as string) : null
+          }))
+        : [];
+      setPaymentLogs(logs);
     }
   };
 
@@ -127,7 +157,7 @@ export default function History() {
   const noTransactions = transactions.length === 0;
   const noResults = !noTransactions && filteredTransactions.length === 0;
 
-  const exportHistoryToExcel = () => {
+  const exportHistoryToExcel = async () => {
     if (filteredTransactions.length === 0) {
       toast.error(t("history.toast.noExport"));
       return;
@@ -176,7 +206,16 @@ export default function History() {
       });
     });
 
-    downloadExcelFile(`${t("history.export.filename")}.xls`, [
+    const defaultName = `${t("history.export.filename")}.xls`;
+    const requestedName = window.prompt(
+      t("history.export.filenamePrompt", { defaultValue: "Choose file name" }),
+      defaultName
+    );
+    const finalName = requestedName && requestedName.trim().length > 0
+      ? (requestedName.trim().endsWith(".xls") ? requestedName.trim() : `${requestedName.trim()}.xls`)
+      : defaultName;
+
+    await saveExcelUsingShareSheet(finalName, [
       { name: t("history.export.transactionsSheet"), rows }
     ]);
   };
@@ -190,7 +229,7 @@ export default function History() {
       return {
         start: startOfDay(day),
         end: endOfDay(day),
-        filename: `${selectedDay}-summary.xls`,
+        filename: `${selectedDay}.xls`,
         label: format(day, 'PPP')
       };
     }
@@ -242,7 +281,7 @@ export default function History() {
     };
   };
 
-  const exportSummary = () => {
+  const exportSummary = async () => {
     const computed = computeRange();
     if (!computed) {
       toast.error(t("history.toast.invalidPeriod"));
@@ -250,10 +289,22 @@ export default function History() {
     }
 
     const { start, end, filename, label } = computed;
+    const requestedName = window.prompt(
+      t("history.export.filenamePrompt", { defaultValue: "Choose file name" }),
+      filename
+    );
+    const finalFilename = requestedName && requestedName.trim().length > 0
+      ? (requestedName.trim().endsWith(".xls") ? requestedName.trim() : `${requestedName.trim()}.xls`)
+      : filename;
 
     const summaryTransactions = transactions.filter(transaction => {
       const transactionDate = new Date(transaction.date);
       return transactionDate >= start && transactionDate <= end;
+    });
+
+    const summaryPayments = paymentLogs.filter(log => {
+      const logDate = new Date(log.created_at);
+      return logDate >= start && logDate <= end;
     });
 
     if (summaryTransactions.length === 0) {
@@ -263,11 +314,9 @@ export default function History() {
 
     const totalAmount = summaryTransactions.reduce((sum, transaction) => sum + transaction.total_amount, 0);
     const paidAmount = summaryTransactions
-      .filter(transaction => transaction.payment_status === 'fully_paid')
-      .reduce((sum, transaction) => sum + transaction.total_amount, 0);
+      .reduce((sum, transaction) => sum + (transaction.paid_amount ?? (transaction.payment_status === 'fully_paid' ? transaction.total_amount : 0)), 0);
     const debtAmount = summaryTransactions
-      .filter(transaction => transaction.payment_status === 'debt')
-      .reduce((sum, transaction) => sum + transaction.total_amount, 0);
+      .reduce((sum, transaction) => sum + transaction.outstanding, 0);
 
     const overviewRows: Array<Array<string | number>> = [
       [t("history.summary.period"), label],
@@ -292,7 +341,7 @@ export default function History() {
           ? t("customers.status.debt")
           : t("customers.status.paid");
         const itemsDescription = transaction.items.length > 0
-          ? transaction.items.map(item => `${item.product_name} (${item.quantity}× ${currencyFormatter.format(item.line_total)})`).join('; ')
+          ? transaction.items.map(item => `${item.product_name} (${item.quantity}× ${formatCurrency(item.line_total)})`).join('; ')
           : t("history.detail.noItems");
 
         return [
@@ -349,13 +398,55 @@ export default function History() {
       });
     });
 
-    downloadExcelFile(filename, [
+    const logEntries = [
+      ...summaryTransactions.map(transaction => ({
+        date: new Date(transaction.date),
+        customer: transaction.customer_name ?? '-',
+        type: transaction.payment_status === 'debt' ? t("history.log.saleDebt", { defaultValue: "Sale (Debt)" }) : t("history.log.salePaid", { defaultValue: "Sale (Paid)" }),
+        total: transaction.total_amount,
+        items: transaction.items.length > 0
+          ? transaction.items.map(item => `${item.product_name} (${item.quantity}× ${formatCurrency(item.line_total)})`).join('; ')
+          : t("history.detail.noItems")
+      })),
+      ...summaryPayments.map(log => ({
+        date: new Date(log.created_at),
+        customer: log.customer_name ?? '-',
+        type: log.amount >= 0
+          ? t("history.log.payment", { defaultValue: "Payment" })
+          : t("history.log.adjustment", { defaultValue: "Adjustment" }),
+        total: log.amount,
+        items: t("history.log.paymentNote", { defaultValue: `Payment for transaction #${log.transaction_id}`, values: { id: log.transaction_id } })
+      }))
+    ];
+
+    const logRows: Array<Array<string | number>> = [[
+      t("history.log.columns.time", { defaultValue: "Time" }),
+      t("history.log.columns.customer", { defaultValue: "Customer" }),
+      t("history.log.columns.type", { defaultValue: "Type" }),
+      t("history.log.columns.total", { defaultValue: "Total" }),
+      t("history.log.columns.items", { defaultValue: "Items / Note" })
+    ]];
+
+    logEntries
+      .sort((a, b) => a.date.getTime() - b.date.getTime())
+      .forEach(entry => {
+        logRows.push([
+          format(entry.date, 'yyyy-MM-dd HH:mm'),
+          entry.customer,
+          entry.type,
+          Number(entry.total.toFixed(2)),
+          entry.items
+        ]);
+      });
+
+    await saveExcelUsingShareSheet(finalFilename, [
       { name: t("history.export.summarySheet"), rows: overviewRows },
-      { name: t("history.export.transactionsSheet"), rows: detailRows }
+      { name: t("history.export.transactionsSheet"), rows: detailRows },
+      { name: t("history.export.logSheet", { defaultValue: "Log" }), rows: logRows }
     ]);
 
-    setIsSummaryDialogOpen(false);
     toast.success(t("history.toast.summaryExported"));
+    setIsSummaryDialogOpen(false);
   };
 
   return (
@@ -442,6 +533,14 @@ export default function History() {
                   />
                 )}
               </div>
+              <div className="text-xs text-muted-foreground">
+                {(() => {
+                  const preview = computeRange();
+                  return preview
+                    ? `${t("history.summary.preview", { defaultValue: "Range" })}: ${preview.label}`
+                    : t("history.summary.previewInvalid", { defaultValue: "Select a valid period" });
+                })()}
+              </div>
 
               <Separator />
 
@@ -473,7 +572,7 @@ export default function History() {
                   </div>
                   <div className="text-right space-y-2">
                     <div className="text-xl font-bold text-primary">
-                      {currencyFormatter.format(transaction.total_amount)}
+                      {formatCurrency(transaction.total_amount)}
                     </div>
                     <Badge variant={transaction.payment_status === 'debt' ? 'destructive' : 'secondary'}>
                       {transaction.payment_status === 'debt' ? t("customers.status.debt") : t("customers.status.paid")}
@@ -531,15 +630,15 @@ export default function History() {
                           <TableRow key={idx}>
                             <TableCell className="font-medium">{item.product_name}</TableCell>
                             <TableCell className="text-right">{item.quantity}</TableCell>
-                            <TableCell className="text-right">{currencyFormatter.format(item.unit_price)}</TableCell>
-                            <TableCell className="text-right font-semibold">{currencyFormatter.format(item.line_total)}</TableCell>
+                          <TableCell className="text-right">{formatCurrency(item.unit_price)}</TableCell>
+                          <TableCell className="text-right font-semibold">{formatCurrency(item.line_total)}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
                       <TableFooter>
                         <TableRow>
                           <TableCell colSpan={3} className="text-right font-medium">{t("history.detail.itemsSubtotal")}</TableCell>
-                          <TableCell className="text-right font-semibold">{currencyFormatter.format(transaction.items.reduce((sum, item) => sum + item.line_total, 0))}</TableCell>
+                          <TableCell className="text-right font-semibold">{formatCurrency(transaction.items.reduce((sum, item) => sum + item.line_total, 0))}</TableCell>
                         </TableRow>
                       </TableFooter>
                     </Table>
@@ -552,7 +651,7 @@ export default function History() {
                   <div className="flex justify-between items-center">
                     <span className="text-lg font-semibold">{t("customers.export.columns.transactionTotal")}</span>
                     <span className="text-2xl font-bold text-primary">
-                      {currencyFormatter.format(transaction.total_amount)}
+                      {formatCurrency(transaction.total_amount)}
                     </span>
                   </div>
                 </div>

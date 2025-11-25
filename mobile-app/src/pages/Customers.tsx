@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -6,13 +6,14 @@ import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { getDatabase, saveDatabase } from "@/lib/db";
+import { getDatabase, logPayment, saveDatabase } from "@/lib/db";
 import { Customer } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { Plus, Phone, Pencil, Download, ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { downloadExcelFile } from "@/lib/excel";
 import { useTranslation } from "@/hooks/useTranslation";
+import { formatCurrency } from "@/lib/utils";
+import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
 
 interface CustomerTransactionItem {
   product_name: string;
@@ -25,6 +26,8 @@ interface CustomerTransaction {
   id: number;
   date: string;
   total_amount: number;
+  paid_amount: number;
+  outstanding: number;
   payment_status: "fully_paid" | "debt";
   items: CustomerTransactionItem[];
 }
@@ -44,11 +47,6 @@ export default function Customers() {
   const [expandedCustomerId, setExpandedCustomerId] = useState<number | null>(null);
   const [transactionsByCustomer, setTransactionsByCustomer] = useState<Record<number, CustomerTransaction[]>>({});
   const { t } = useTranslation();
-
-  const currencyFormatter = useMemo(() => new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: "USD"
-  }), []);
 
   useEffect(() => {
     loadCustomers();
@@ -114,8 +112,8 @@ export default function Customers() {
       `SELECT
          COUNT(*) as count,
          COALESCE(SUM(total_amount), 0) as total,
-         COALESCE(SUM(CASE WHEN payment_status = 'fully_paid' THEN total_amount ELSE 0 END), 0) as paid,
-         COALESCE(SUM(CASE WHEN payment_status = 'debt' THEN total_amount ELSE 0 END), 0) as debt
+         COALESCE(SUM(paid_amount), 0) as paid,
+         COALESCE(SUM(total_amount - paid_amount), 0) as debt
        FROM transactions
        WHERE customer_id = ?`,
       [customerId]
@@ -135,7 +133,7 @@ export default function Customers() {
   const loadCustomerTransactions = (customerId: number) => {
     const db = getDatabase();
     const result = db.exec(
-      `SELECT id, date, total_amount, payment_status
+      `SELECT id, date, total_amount, payment_status, paid_amount
        FROM transactions
        WHERE customer_id = ?
        ORDER BY date DESC`,
@@ -166,7 +164,9 @@ export default function Customers() {
             id: transactionId,
             date: row[1] as string,
             total_amount: row[2] as number,
-            payment_status: (row[3] as string) === "debt" ? "debt" : "fully_paid",
+            paid_amount: row[4] === null ? 0 : Number(row[4]),
+            outstanding: Math.max((row[2] as number) - Number(row[4] ?? 0), 0),
+            payment_status: (row[3] as string) === "debt" || ((row[2] as number) - Number(row[4] ?? 0)) > 0 ? "debt" : "fully_paid",
             items
           };
         })
@@ -191,6 +191,10 @@ export default function Customers() {
     const db = getDatabase();
     db.run(
       "DELETE FROM transaction_items WHERE transaction_id IN (SELECT id FROM transactions WHERE customer_id = ?)",
+      [customer.id]
+    );
+    db.run(
+      "DELETE FROM payment_logs WHERE transaction_id IN (SELECT id FROM transactions WHERE customer_id = ?)",
       [customer.id]
     );
     db.run("DELETE FROM transactions WHERE customer_id = ?", [customer.id]);
@@ -221,6 +225,7 @@ export default function Customers() {
     const db = getDatabase();
     db.run("DELETE FROM transaction_items");
     db.run("DELETE FROM transactions");
+    db.run("DELETE FROM payment_logs");
     db.run("UPDATE shopping_lists SET customer_id = NULL");
     db.run("DELETE FROM customers");
     saveDatabase();
@@ -236,14 +241,65 @@ export default function Customers() {
     if (!current) return;
 
     const nextStatus = current.payment_status === "fully_paid" ? "debt" : "fully_paid";
+    const nextPaidAmount = nextStatus === "fully_paid"
+      ? current.total_amount
+      : current.paid_amount && current.paid_amount < current.total_amount
+        ? current.paid_amount
+        : 0;
 
     try {
       db.run(
-        "UPDATE transactions SET payment_status = ? WHERE id = ?",
-        [nextStatus, transactionId]
+        "UPDATE transactions SET payment_status = ?, paid_amount = ? WHERE id = ?",
+        [nextStatus, nextPaidAmount, transactionId]
       );
+      const delta = nextPaidAmount - (current.paid_amount ?? 0);
+      if (delta !== 0) {
+        logPayment(transactionId, delta, `Status toggled to ${nextStatus}`);
+      }
       saveDatabase();
       toast.success(t("customers.toast.statusUpdated"));
+      loadCustomers();
+      loadCustomerTransactions(customerId);
+    } catch (error) {
+      console.error(error);
+      toast.error(t("customers.toast.statusError"));
+    }
+  };
+
+  const handleAdjustPayment = (customerId: number, transactionId: number) => {
+    const db = getDatabase();
+    const current = transactionsByCustomer[customerId]?.find(tx => tx.id === transactionId);
+    if (!current) return;
+
+    const promptLabel = t("customers.transactions.adjustPrompt", {
+      defaultValue: `Enter amount to pay (outstanding ${formatCurrency(current.outstanding)})`,
+      values: { amount: formatCurrency(current.outstanding) }
+    });
+    const input = window.prompt(promptLabel, String(Math.max(current.outstanding, 0)));
+    if (input === null) {
+      return;
+    }
+
+    const parsed = Number(input);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      toast.error(t("customers.toast.invalidAmount", { defaultValue: "Please enter a valid number" }));
+      return;
+    }
+
+    const clamped = Math.min(parsed, current.total_amount);
+    const nextStatus = clamped >= current.total_amount ? "fully_paid" : "debt";
+
+    try {
+      db.run(
+        "UPDATE transactions SET paid_amount = ?, payment_status = ? WHERE id = ?",
+        [clamped, nextStatus, transactionId]
+      );
+      const delta = clamped - (current.paid_amount ?? 0);
+      if (delta !== 0) {
+        logPayment(transactionId, delta, "Manual payment update");
+      }
+      saveDatabase();
+      toast.success(t("customers.toast.amountUpdated", { defaultValue: "Payment updated" }));
       loadCustomers();
       loadCustomerTransactions(customerId);
     } catch (error) {
@@ -305,10 +361,10 @@ export default function Customers() {
       })
     ];
 
-    downloadExcelFile(`${customer.name.replace(/[^a-z0-9]/gi, "_")}_${t("customers.export.reportSuffix")}.xls`, [
+    saveExcelUsingShareSheet(`${customer.name.replace(/[^a-z0-9]/gi, "_")}_${t("customers.export.reportSuffix")}.xls`, [
       { name: t("customers.export.summarySheet"), rows: summaryRows },
       { name: t("customers.export.transactionsSheet"), rows: transactionRows }
-    ]);
+    ]).catch(() => toast.error(t("customers.toast.noExport")));
   };
 
   const exportAllCustomers = () => {
@@ -355,9 +411,9 @@ export default function Customers() {
       });
     }
 
-    downloadExcelFile(`${t("customers.export.overviewFilename")}.xls`, [
+    saveExcelUsingShareSheet(`${t("customers.export.overviewFilename")}.xls`, [
       { name: t("customers.export.overviewSheet"), rows }
-    ]);
+    ]).catch(() => toast.error(t("customers.toast.noExport")));
   };
 
   const filteredCustomers = customers.filter(c =>
@@ -514,15 +570,15 @@ export default function Customers() {
                     </div>
                     <div>
                       <div className="text-sm text-muted-foreground">{t("customers.totalSpent")}</div>
-                      <div className="text-xl font-bold text-primary">{currencyFormatter.format(stats.total)}</div>
+                      <div className="text-xl font-bold text-primary">{formatCurrency(stats.total)}</div>
                     </div>
                     <div>
                       <div className="text-sm text-muted-foreground">{t("customers.totalPaid")}</div>
-                      <div className="text-lg font-semibold text-emerald-600">{currencyFormatter.format(stats.paid)}</div>
+                      <div className="text-lg font-semibold text-emerald-600">{formatCurrency(stats.paid)}</div>
                     </div>
                     <div>
                       <div className="text-sm text-muted-foreground">{t("customers.totalDebt")}</div>
-                      <div className="text-lg font-semibold text-destructive">{currencyFormatter.format(stats.debt)}</div>
+                      <div className="text-lg font-semibold text-destructive">{formatCurrency(stats.debt)}</div>
                     </div>
                   </div>
 
@@ -537,7 +593,7 @@ export default function Customers() {
                             key={transaction.id}
                             className="border border-border rounded-lg p-3 space-y-2 bg-muted/40"
                           >
-                            <div className="flex justify-between items-center">
+                            <div className="flex justify-between items-center flex-wrap gap-3">
                               <div>
                                 <div className="font-semibold">
                                   {t("customers.transactions.transactionNumber", { values: { id: transaction.id } })}
@@ -545,26 +601,43 @@ export default function Customers() {
                                 <div className="text-xs text-muted-foreground">{new Date(transaction.date).toLocaleString()}</div>
                               </div>
                               <div className="flex items-center gap-2">
-                                <Badge variant={transaction.payment_status === "debt" ? "destructive" : "secondary"}>
-                                  {statusLabel(transaction.payment_status)}
-                                </Badge>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  onClick={() => handleTogglePaymentStatus(customer.id, transaction.id)}
-                                >
-                                  {t("customers.transactions.setStatus", {
-                                    values: { status: statusLabel(transaction.payment_status === "debt" ? "fully_paid" : "debt") }
-                                  })}
-                                </Button>
-                              </div>
+                        <Badge variant={transaction.payment_status === "debt" ? "destructive" : "secondary"}>
+                          {statusLabel(transaction.payment_status)}
+                        </Badge>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => handleTogglePaymentStatus(customer.id, transaction.id)}
+                        >
+                          {t("customers.transactions.setStatus", {
+                            values: { status: statusLabel(transaction.payment_status === "debt" ? "fully_paid" : "debt") }
+                          })}
+                        </Button>
+                        {(transaction.payment_status === "debt" || transaction.outstanding > 0) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleAdjustPayment(customer.id, transaction.id)}
+                          >
+                            {t("customers.transactions.adjustAmount", { defaultValue: "Adjust amount" })}
+                          </Button>
+                        )}
+                      </div>
                             </div>
-                            <div className="flex justify-between items-center">
-                              <div className="text-sm text-muted-foreground">
+                            <div className="flex justify-between items-center flex-wrap gap-3">
+                              <div className="text-sm text-muted-foreground flex-1">
                                 {t("customers.transactions.itemsCount", { values: { count: transaction.items.length } })}
                               </div>
-                              <div className="text-lg font-bold text-primary">
-                                {currencyFormatter.format(transaction.total_amount)}
+                              <div className="text-right space-y-1">
+                                <div className="text-xs text-muted-foreground">
+                                  {t("customers.transactions.outstanding", {
+                                    defaultValue: "Outstanding: {amount}",
+                                    values: { amount: formatCurrency(transaction.outstanding) }
+                                  })}
+                                </div>
+                                <div className="text-lg font-bold text-primary">
+                                  {formatCurrency(transaction.total_amount)}
+                                </div>
                               </div>
                             </div>
                             <div className="space-y-1">
@@ -575,11 +648,11 @@ export default function Customers() {
                                       values: {
                                         name: item.product_name,
                                         quantity: item.quantity,
-                                        price: currencyFormatter.format(item.unit_price)
+                                        price: formatCurrency(item.unit_price)
                                       }
                                     })}
                                   </div>
-                                  <div className="font-medium">{currencyFormatter.format(item.line_total)}</div>
+                                  <div className="font-medium">{formatCurrency(item.line_total)}</div>
                                 </div>
                               ))}
                             </div>

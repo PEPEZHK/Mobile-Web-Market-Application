@@ -24,6 +24,7 @@ export interface Transaction {
   customer_id: number | null;
   total_amount: number;
   payment_status: 'debt' | 'fully_paid';
+  paid_amount?: number;
 }
 
 export interface TransactionItem {
@@ -38,12 +39,13 @@ export interface TransactionItem {
 export interface CartItem {
   product: Product;
   quantity: number;
+  unitPrice?: number;
 }
 
 export interface ShoppingList {
   id: number;
   title: string;
-  type: 'restock' | 'customer_order';
+  type: 'restock' | 'customer_order' | 'monthly_restock';
   status: 'active' | 'completed' | 'archived';
   priority: 'low' | 'medium' | 'high';
   notes: string | null;

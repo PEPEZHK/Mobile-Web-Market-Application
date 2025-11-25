@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { getDatabase, saveDatabase } from "@/lib/db";
-import { syncListItemsToDepot, UNASSIGNED_CUSTOMER_VALUE } from "@/lib/shopping";
+import { ensureMonthlyRestockList, MONTHLY_RESTOCK_TYPE, syncListItemsToDepot, transferMonthlyRestock, UNASSIGNED_CUSTOMER_VALUE } from "@/lib/shopping";
 import { Customer, ShoppingList, ShoppingListWithStats } from "@/types";
 import { useTranslation } from "@/hooks/useTranslation";
 import {
@@ -35,6 +35,7 @@ import {
   Trash2
 } from "lucide-react";
 import { toast } from "sonner";
+import { formatCurrency } from "@/lib/utils";
 
 const defaultListForm: ListFormState = {
   title: "",
@@ -79,6 +80,7 @@ function priorityVariant(priority: ShoppingList["priority"]): "outline" | "defau
 export default function ShoppingListPage() {
   const navigate = useNavigate();
   const [lists, setLists] = useState<ShoppingListWithStats[]>([]);
+  const [monthlyRestock, setMonthlyRestock] = useState<ShoppingListWithStats | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [filter, setFilter] = useState<ListFilter>("all");
   const [searchTerm, setSearchTerm] = useState("");
@@ -86,13 +88,12 @@ export default function ShoppingListPage() {
   const [editingListId, setEditingListId] = useState<number | null>(null);
   const [listForm, setListForm] = useState<ListFormState>(defaultListForm);
   const { t } = useTranslation();
-  const currencyFormatter = useMemo(() => new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: "USD"
-  }), []);
 
-  const listTypeLabel = (type: ShoppingList["type"]): string =>
-    type === "customer_order" ? t("shopping.type.customerOrder") : t("shopping.type.restock");
+  const listTypeLabel = (type: ShoppingList["type"]): string => {
+    if (type === "customer_order") return t("shopping.type.customerOrder");
+    if (type === MONTHLY_RESTOCK_TYPE) return t("shopping.type.monthlyRestock", { defaultValue: "Monthly restock" });
+    return t("shopping.type.restock");
+  };
 
   const statusLabel = (status: ShoppingList["status"]): string => {
     switch (status) {
@@ -131,12 +132,15 @@ export default function ShoppingListPage() {
   const filteredLists = useMemo(() => {
     const lowerSearch = searchTerm.trim().toLowerCase();
     return lists.filter(list => {
+      const isMonthlyRestock = list.type === MONTHLY_RESTOCK_TYPE;
       const matchesFilter =
         filter === "all"
           ? true
           : filter === "completed"
             ? list.status === "completed"
-            : list.type === filter;
+            : filter === "restock"
+              ? list.type === "restock" || isMonthlyRestock
+              : list.type === "customer_order";
       const matchesSearch = lowerSearch
         ? list.title.toLowerCase().includes(lowerSearch) || (list.customer_name?.toLowerCase().includes(lowerSearch) ?? false)
         : true;
@@ -154,6 +158,8 @@ export default function ShoppingListPage() {
 
   const loadLists = () => {
     const db = getDatabase();
+    const monthlyListId = ensureMonthlyRestockList(db);
+    saveDatabase();
     const listResult = db.exec(`
       SELECT l.id, l.title, l.type, l.status, l.priority, l.notes, l.customer_id, c.name, l.due_date, l.created_at
       FROM shopping_lists l
@@ -206,6 +212,9 @@ export default function ShoppingListPage() {
         })
       : [];
 
+    const monthlyList = loadedLists.find(list => list.type === MONTHLY_RESTOCK_TYPE) ?? null;
+
+    setMonthlyRestock(monthlyList);
     setLists(loadedLists);
   };
 
@@ -356,6 +365,19 @@ export default function ShoppingListPage() {
     loadLists();
   };
 
+  const handleTransferMonthlyRestock = () => {
+    const db = getDatabase();
+    const listId = monthlyRestock?.id ?? ensureMonthlyRestockList(db);
+    const transferResult = transferMonthlyRestock(db, listId);
+    saveDatabase();
+    toast.success(
+      t("shopping.toast.itemsTransferred", {
+        values: { count: transferResult.updatedProducts || transferResult.totalQuantity }
+      })
+    );
+    loadLists();
+  };
+
   return (
     <Layout title={t("shopping.title")}>
       <div className="space-y-6">
@@ -370,9 +392,36 @@ export default function ShoppingListPage() {
           </Card>
           <Card className="p-4">
             <p className="text-sm text-muted-foreground">{t("shopping.stats.outstanding")}</p>
-            <div className="text-2xl font-semibold">{currencyFormatter.format(overallStats.outstanding)}</div>
+            <div className="text-2xl font-semibold">{formatCurrency(overallStats.outstanding)}</div>
           </Card>
         </div>
+
+        {monthlyRestock && (
+          <Card className="p-4 border-dashed border-primary/40">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1">
+                <p className="text-sm text-muted-foreground">
+                  {t("shopping.monthly.subtitle", { defaultValue: "Monthly restock list" })}
+                </p>
+                <h3 className="text-lg font-semibold">{monthlyRestock.title}</h3>
+                <p className="text-xs text-muted-foreground">
+                  {t("shopping.monthly.pending", {
+                    defaultValue: "Pending items: {count}",
+                    values: { count: monthlyRestock.pending_count }
+                  })}
+                </p>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button variant="outline" onClick={() => navigate(`/shopping-list/${monthlyRestock.id}`)}>
+                  {t("shopping.monthly.view", { defaultValue: "Open list" })}
+                </Button>
+                <Button onClick={handleTransferMonthlyRestock} disabled={monthlyRestock.pending_count === 0}>
+                  {t("shopping.monthly.transfer", { defaultValue: "Transfer items" })}
+                </Button>
+              </div>
+            </div>
+          </Card>
+        )}
 
         <Card className="h-full">
           <div className="flex flex-col gap-4 p-4">
@@ -432,6 +481,9 @@ export default function ShoppingListPage() {
                           <SelectContent>
                             <SelectItem value="restock">{t("shopping.type.restock")}</SelectItem>
                             <SelectItem value="customer_order">{t("shopping.type.customerOrder")}</SelectItem>
+                            <SelectItem value={MONTHLY_RESTOCK_TYPE} disabled>
+                              {t("shopping.type.monthlyRestock", { defaultValue: "Monthly restock" })}
+                            </SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -550,11 +602,11 @@ export default function ShoppingListPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">{t("shopping.filter.all")}</SelectItem>
-                    <SelectItem value="restock">{t("shopping.filter.restock")}</SelectItem>
-                    <SelectItem value="customer_order">{t("shopping.filter.customer")}</SelectItem>
-                    <SelectItem value="completed">{t("shopping.filter.completed")}</SelectItem>
-                  </SelectContent>
-                </Select>
+                <SelectItem value="restock">{t("shopping.filter.restock")}</SelectItem>
+                <SelectItem value="customer_order">{t("shopping.filter.customer")}</SelectItem>
+                <SelectItem value="completed">{t("shopping.filter.completed")}</SelectItem>
+              </SelectContent>
+            </Select>
               </div>
             </div>
 
@@ -597,7 +649,7 @@ export default function ShoppingListPage() {
                           <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                             <span>{t("shopping.list.summary.items", { values: { count: totalItems } })}</span>
                             <span>{t("shopping.list.summary.pending", { values: { count: list.pending_count } })}</span>
-                            <span>{t("shopping.list.summary.budget", { values: { amount: currencyFormatter.format(list.estimated_total) } })}</span>
+                            <span>{t("shopping.list.summary.budget", { values: { amount: formatCurrency(list.estimated_total) } })}</span>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">

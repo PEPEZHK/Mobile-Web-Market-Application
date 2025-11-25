@@ -8,6 +8,18 @@ importers:
 
   .:
     dependencies:
+      '@capacitor/core':
+        specifier: ^7.4.4
+        version: 7.4.4
+      '@capacitor/filesystem':
+        specifier: ^7.1.4
+        version: 7.1.4(@capacitor/core@7.4.4)
+      '@capacitor/share':
+        specifier: ^7.0.2
+        version: 7.0.2(@capacitor/core@7.4.4)
+      '@capawesome/capacitor-file-picker':
+        specifier: ^7.2.0
+        version: 7.2.0(@capacitor/core@7.4.4)
       '@hookform/resolvers':
         specifier: ^3.10.0
         version: 3.10.0(react-hook-form@7.66.0(react@18.3.1))
@@ -95,6 +107,9 @@ importers:
       '@tanstack/react-query':
         specifier: ^5.83.0
         version: 5.90.9(react@18.3.1)
+      capacitor-plugin-filedownload:
+        specifier: ^2.0.0
+        version: 2.0.0(@capacitor/core@7.4.4)
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -720,6 +735,27 @@ packages:
   '@babel/types@7.28.5':
     resolution: {integrity: sha512-qQ5m48eI/MFLQ5PxQj4PFaprjyCTLI37ElWMmNs0K8Lk3dVeOdNpB3ks8jc7yM5CDmVC73eMVk/trk3fgmrUpA==}
     engines: {node: '>=6.9.0'}
+
+  '@capacitor/core@7.4.4':
+    resolution: {integrity: sha512-xzjxpr+d2zwTpCaN0k+C6wKSZzWFAb9OVEUtmO72ihjr/NEDoLvsGl4WLfjWPcCO2zOy0b2X52tfRWjECFUjtw==}
+
+  '@capacitor/filesystem@7.1.4':
+    resolution: {integrity: sha512-BdUnOVulHAtruW2GeC9o7e9LO5aFcVYqNn3dLypJSOck/WipUFNfI0QWoUS0FVGeqBbDJgFGi3zjXJx0lzbDkA==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
+
+  '@capacitor/share@7.0.2':
+    resolution: {integrity: sha512-VyNPo/9831xnL17IMDeft5yNdBjoKNb451P95sRcr69hulRDqHc+kndqOVaMXnaA6IyBdWnnFv/n1HUf4cXpGw==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
+
+  '@capacitor/synapse@1.0.4':
+    resolution: {integrity: sha512-/C1FUo8/OkKuAT4nCIu/34ny9siNHr9qtFezu4kxm6GY1wNFxrCFWjfYx5C1tUhVGz3fxBABegupkpjXvjCHrw==}
+
+  '@capawesome/capacitor-file-picker@7.2.0':
+    resolution: {integrity: sha512-qUNa+Ypem575xSNiJwgiOaaHXzAHaxMtERySRIsIC0HggoCa11xGS3xEVtMooQ3fS0cDXfl4/17DYoHQtkDjXA==}
+    peerDependencies:
+      '@capacitor/core': '>=7.0.0'
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -2306,6 +2342,11 @@ packages:
 
   caniuse-lite@1.0.30001754:
     resolution: {integrity: sha512-x6OeBXueoAceOmotzx3PO4Zpt4rzpeIFsSr6AAePTZxSkXiYDUmpypEl7e2+8NCd9bD7bXjqyef8CJYPC1jfxg==}
+
+  capacitor-plugin-filedownload@2.0.0:
+    resolution: {integrity: sha512-KEd/8rTOlHL79OUbFjppkKEIdtR9V9uD1mQlxSkEvFH8kXkl8TV9Q3Vp3wMxgIvFPjK4CCu6JOD51zjMOAtyag==}
+    peerDependencies:
+      '@capacitor/core': ^5.0.0
 
   chalk@4.1.2:
     resolution: {integrity: sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA==}
@@ -4600,6 +4641,25 @@ snapshots:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
 
+  '@capacitor/core@7.4.4':
+    dependencies:
+      tslib: 2.8.1
+
+  '@capacitor/filesystem@7.1.4(@capacitor/core@7.4.4)':
+    dependencies:
+      '@capacitor/core': 7.4.4
+      '@capacitor/synapse': 1.0.4
+
+  '@capacitor/share@7.0.2(@capacitor/core@7.4.4)':
+    dependencies:
+      '@capacitor/core': 7.4.4
+
+  '@capacitor/synapse@1.0.4': {}
+
+  '@capawesome/capacitor-file-picker@7.2.0(@capacitor/core@7.4.4)':
+    dependencies:
+      '@capacitor/core': 7.4.4
+
   '@esbuild/aix-ppc64@0.21.5':
     optional: true
 
@@ -6062,6 +6122,10 @@ snapshots:
   camelcase-css@2.0.1: {}
 
   caniuse-lite@1.0.30001754: {}
+
+  capacitor-plugin-filedownload@2.0.0(@capacitor/core@7.4.4):
+    dependencies:
+      '@capacitor/core': 7.4.4
 
   chalk@4.1.2:
     dependencies:

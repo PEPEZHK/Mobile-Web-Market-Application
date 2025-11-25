@@ -19,9 +19,8 @@ function formatCellValue(value: string | number) {
   return { type: "String", value: escapeXml(String(value)) } as const;
 }
 
-export function downloadExcelFile(filename: string, sheets: WorksheetData[]) {
-  if (sheets.length === 0) return;
-
+export function createExcelBlob(sheets: WorksheetData[]): Blob | null {
+  if (sheets.length === 0) return null;
   const worksheetXml = sheets.map(sheet => {
     const rowsXml = sheet.rows.map(row => {
       const cellsXml = row.map(cell => {
@@ -49,7 +48,12 @@ export function downloadExcelFile(filename: string, sheets: WorksheetData[]) {
       ${worksheetXml}
     </Workbook>`;
 
-  const blob = new Blob([workbookXml], { type: "application/vnd.ms-excel" });
+  return new Blob([workbookXml], { type: "application/vnd.ms-excel" });
+}
+
+export function downloadExcelFile(filename: string, sheets: WorksheetData[]) {
+  const blob = createExcelBlob(sheets);
+  if (!blob) return;
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

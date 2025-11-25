@@ -30,9 +30,9 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
-import { downloadExcelFile } from "@/lib/excel";
+import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
 import { getDatabase, saveDatabase } from "@/lib/db";
-import { syncListItemsToDepot, UNASSIGNED_CUSTOMER_VALUE } from "@/lib/shopping";
+import { MONTHLY_RESTOCK_TYPE, syncListItemsToDepot, transferMonthlyRestock, UNASSIGNED_CUSTOMER_VALUE } from "@/lib/shopping";
 import {
   Customer,
   Product,
@@ -51,6 +51,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "@/hooks/useTranslation";
+import { formatCurrency } from "@/lib/utils";
 
 interface ItemFormState {
   name: string;
@@ -95,7 +96,7 @@ const defaultListForm: ListFormState = {
 };
 
 function formatMoney(value: number): string {
-  return `$${value.toFixed(2)}`;
+  return formatCurrency(value);
 }
 
 function formatDate(value?: string | null): string | null {
@@ -142,9 +143,13 @@ export default function ShoppingListDetailPage() {
   const [isListDialogOpen, setIsListDialogOpen] = useState(false);
   const [listForm, setListForm] = useState<ListFormState>(defaultListForm);
   const { t } = useTranslation();
+  const isMonthlyRestock = list?.type === MONTHLY_RESTOCK_TYPE;
 
-  const listTypeLabel = (type: ShoppingList["type"]): string =>
-    type === "customer_order" ? t("shopping.type.customerOrder") : t("shopping.type.restock");
+  const listTypeLabel = (type: ShoppingList["type"]): string => {
+    if (type === "customer_order") return t("shopping.type.customerOrder");
+    if (type === MONTHLY_RESTOCK_TYPE) return t("shopping.type.monthlyRestock", { defaultValue: "Monthly restock" });
+    return t("shopping.type.restock");
+  };
 
   const statusLabel = (status: ShoppingList["status"]): string => {
     switch (status) {
@@ -179,13 +184,19 @@ export default function ShoppingListDetailPage() {
   }, [listId]);
 
   const pendingItems = useMemo(
-    () => items.filter(item => item.is_completed === 0),
-    [items]
+    () => items.filter(item =>
+      item.is_completed === 0 &&
+      (!isMonthlyRestock || item.quantity_value > 0)
+    ),
+    [items, isMonthlyRestock]
   );
 
   const completedItems = useMemo(
-    () => items.filter(item => item.is_completed === 1),
-    [items]
+    () => items.filter(item =>
+      item.is_completed === 1 &&
+      (!isMonthlyRestock || item.quantity_value > 0)
+    ),
+    [items, isMonthlyRestock]
   );
 
   const totalEstimatedCost = useMemo(() => {
@@ -523,6 +534,10 @@ export default function ShoppingListDetailPage() {
 
   const handleDeleteList = () => {
     if (!list) return;
+    if (isMonthlyRestock) {
+      toast.error(t("shopping.detail.monthly.noDelete", { defaultValue: "Monthly restock list cannot be deleted." }));
+      return;
+    }
     const confirmed = window.confirm(
       t("shopping.confirm.deleteList", { values: { title: list.title } })
     );
@@ -538,8 +553,22 @@ export default function ShoppingListDetailPage() {
 
   const handleToggleListStatus = () => {
     if (!list) return;
-    const nextStatus = list.status === "completed" ? "active" : "completed";
     const db = getDatabase();
+
+    if (isMonthlyRestock) {
+      const transferResult = transferMonthlyRestock(db, list.id);
+      saveDatabase();
+      toast.success(
+        t("shopping.toast.itemsTransferred", {
+          values: { count: transferResult.updatedProducts || transferResult.totalQuantity }
+        })
+      );
+      loadItems(list.id);
+      loadList(list.id);
+      return;
+    }
+
+    const nextStatus = list.status === "completed" ? "active" : "completed";
     let transferResult: ReturnType<typeof syncListItemsToDepot> | null = null;
 
     if (nextStatus === "completed") {
@@ -563,6 +592,20 @@ export default function ShoppingListDetailPage() {
     }
     loadList(list.id);
     loadItems(list.id);
+  };
+
+  const handleTransferNow = () => {
+    if (!list || !isMonthlyRestock) return;
+    const db = getDatabase();
+    const transferResult = transferMonthlyRestock(db, list.id);
+    saveDatabase();
+    toast.success(
+      t("shopping.toast.itemsTransferred", {
+        values: { count: transferResult.updatedProducts || transferResult.totalQuantity }
+      })
+    );
+    loadItems(list.id);
+    loadList(list.id);
   };
 
   const handleEditItem = (item: ShoppingListItemWithProduct) => {
@@ -651,13 +694,13 @@ export default function ShoppingListDetailPage() {
       ]);
     });
 
-    downloadExcelFile(
+    saveExcelUsingShareSheet(
       `${list.title.replace(/\s+/g, "_").toLowerCase()}_shopping_list.xls`,
       [
         { name: t("shopping.detail.export.summarySheet"), rows: summaryRows },
         { name: t("shopping.detail.export.itemsSheet"), rows: itemRows }
       ]
-    );
+    ).catch(() => toast.error(t("shopping.detail.toast.listSaveError")));
   };
 
   if (!Number.isFinite(listId)) {
@@ -699,6 +742,12 @@ export default function ShoppingListDetailPage() {
               <Download className="mr-2 h-4 w-4" />
               {t("shopping.actions.export")}
             </Button>
+            {isMonthlyRestock && (
+              <Button onClick={handleTransferNow}>
+                <RefreshCcw className="mr-2 h-4 w-4" />
+                {t("shopping.monthly.transfer", { defaultValue: "Transfer items" })}
+              </Button>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="secondary">
@@ -711,16 +760,25 @@ export default function ShoppingListDetailPage() {
                   <Pencil className="mr-2 h-4 w-4" />
                   {t("shopping.detail.actions.editDetails")}
                 </DropdownMenuItem>
-                <DropdownMenuItem onSelect={handleToggleListStatus}>
-                  <RefreshCcw className="mr-2 h-4 w-4" />
-                  {list.status === "completed"
-                    ? t("shopping.actions.reopen")
-                    : t("shopping.actions.markCompleted")}
-                </DropdownMenuItem>
-                <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={handleDeleteList}>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  {t("shopping.actions.deleteList")}
-                </DropdownMenuItem>
+                {isMonthlyRestock ? (
+                  <DropdownMenuItem onSelect={handleTransferNow}>
+                    <RefreshCcw className="mr-2 h-4 w-4" />
+                    {t("shopping.monthly.transfer", { defaultValue: "Transfer items" })}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem onSelect={handleToggleListStatus}>
+                    <RefreshCcw className="mr-2 h-4 w-4" />
+                    {list.status === "completed"
+                      ? t("shopping.actions.reopen")
+                      : t("shopping.actions.markCompleted")}
+                  </DropdownMenuItem>
+                )}
+                {!isMonthlyRestock && (
+                  <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={handleDeleteList}>
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    {t("shopping.actions.deleteList")}
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -744,6 +802,11 @@ export default function ShoppingListDetailPage() {
               {list.notes && (
                 <p className="max-w-2xl whitespace-pre-wrap text-sm text-muted-foreground">
                   {list.notes}
+                </p>
+              )}
+              {isMonthlyRestock && (
+                <p className="text-xs text-muted-foreground">
+                  {t("shopping.monthly.helper", { defaultValue: "Sales automatically add sold quantities back here for the next restock." })}
                 </p>
               )}
             </div>
@@ -1100,15 +1163,18 @@ export default function ShoppingListDetailPage() {
                     }))
                   }
                 >
-                  <SelectTrigger>
-                    <SelectValue placeholder={t("shopping.form.typePlaceholder")} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="restock">{t("shopping.type.restock")}</SelectItem>
-                    <SelectItem value="customer_order">{t("shopping.type.customerOrder")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+                          <SelectTrigger>
+                            <SelectValue placeholder={t("shopping.form.typePlaceholder")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="restock">{t("shopping.type.restock")}</SelectItem>
+                            <SelectItem value="customer_order">{t("shopping.type.customerOrder")}</SelectItem>
+                            <SelectItem value={MONTHLY_RESTOCK_TYPE} disabled>
+                              {t("shopping.type.monthlyRestock", { defaultValue: "Monthly restock" })}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
               <div className="space-y-2">
                 <Label>{t("shopping.form.status")}</Label>
                 <Select

@@ -1,10 +1,94 @@
 import type { Database } from "sql.js";
+import type { Product } from "../types";
 
 export const UNASSIGNED_CUSTOMER_VALUE = "__unassigned__";
+export const MONTHLY_RESTOCK_TYPE = "monthly_restock";
 
 export interface ListDepotSyncResult {
   updatedProducts: number;
   totalQuantity: number;
+}
+
+export function ensureMonthlyRestockList(database: Database): number {
+  const existing = database.exec(
+    "SELECT id FROM shopping_lists WHERE type = ? LIMIT 1",
+    [MONTHLY_RESTOCK_TYPE]
+  );
+
+  if (existing[0]?.values?.length) {
+    return existing[0].values[0][0] as number;
+  }
+
+  database.run(
+    `INSERT INTO shopping_lists (title, type, status, priority, notes)
+     VALUES (?, ?, 'active', 'high', ?)`,
+    [
+      "Monthly Restock",
+      MONTHLY_RESTOCK_TYPE,
+      "Automatically created monthly restock list"
+    ]
+  );
+
+  const inserted = database.exec("SELECT last_insert_rowid()");
+  return inserted[0]?.values?.[0]?.[0] as number;
+}
+
+export function addSaleItemsToMonthlyRestock(database: Database, cartItems: Array<{ product: Product; quantity: number }>) {
+  const listId = ensureMonthlyRestockList(database);
+
+  cartItems.forEach(({ product, quantity }) => {
+    if (!product?.id || !Number.isFinite(quantity) || quantity <= 0) {
+      return;
+    }
+
+    const existing = database.exec(
+      "SELECT id, quantity_value FROM shopping_list_items WHERE list_id = ? AND product_id = ? LIMIT 1",
+      [listId, product.id]
+    );
+
+    if (existing[0]?.values?.length) {
+      const row = existing[0].values[0];
+      const itemId = row[0] as number;
+      const currentQty = Number(row[1] ?? 0);
+      database.run(
+        `UPDATE shopping_list_items
+         SET quantity_value = ?, estimated_unit_cost = ?, sell_price = ?, category = ?, name = ?, is_completed = 0
+         WHERE id = ?`,
+        [
+          currentQty + quantity,
+          product.buy_price ?? 0,
+          product.sell_price ?? 0,
+          product.category ?? null,
+          product.name,
+          itemId
+        ]
+      );
+    } else {
+      database.run(
+        `INSERT INTO shopping_list_items (list_id, product_id, name, quantity_value, estimated_unit_cost, sell_price, category, is_completed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+        [
+          listId,
+          product.id,
+          product.name,
+          quantity,
+          product.buy_price ?? 0,
+          product.sell_price ?? 0,
+          product.category ?? null
+        ]
+      );
+    }
+  });
+
+  return listId;
+}
+
+export function resetMonthlyRestockAfterTransfer(database: Database, listId?: number) {
+  const targetListId = listId ?? ensureMonthlyRestockList(database);
+  database.run(
+    "UPDATE shopping_list_items SET is_completed = 1, quantity_value = 0 WHERE list_id = ?",
+    [targetListId]
+  );
 }
 
 export function syncListItemsToDepot(database: Database, listId: number): ListDepotSyncResult {
@@ -85,4 +169,11 @@ export function syncListItemsToDepot(database: Database, listId: number): ListDe
   );
 
   return { updatedProducts, totalQuantity };
+}
+
+export function transferMonthlyRestock(database: Database, listId?: number): ListDepotSyncResult {
+  const targetListId = listId ?? ensureMonthlyRestockList(database);
+  const result = syncListItemsToDepot(database, targetListId);
+  resetMonthlyRestockAfterTransfer(database, targetListId);
+  return result;
 }

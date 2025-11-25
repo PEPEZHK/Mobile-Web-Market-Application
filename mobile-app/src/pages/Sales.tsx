@@ -9,12 +9,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Textarea } from "@/components/ui/textarea";
-import { getDatabase, saveDatabase } from "@/lib/db";
+import { getDatabase, logPayment, saveDatabase } from "@/lib/db";
 import { Product, Customer, CartItem } from "@/types";
 import { Plus, Trash2, ShoppingCart, Search, ChevronsUpDown, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import type { Database } from "sql.js";
 import { useTranslation } from "@/hooks/useTranslation";
+import { formatCurrency } from "@/lib/utils";
+import { addSaleItemsToMonthlyRestock } from "@/lib/shopping";
 
 export default function Sales() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -96,8 +98,8 @@ export default function Sales() {
     const summaryResult = db.exec(`
       SELECT
         COALESCE(SUM(total_amount), 0) as total,
-        COALESCE(SUM(CASE WHEN payment_status = 'fully_paid' THEN total_amount ELSE 0 END), 0) as paid,
-        COALESCE(SUM(CASE WHEN payment_status = 'debt' THEN total_amount ELSE 0 END), 0) as debt
+        COALESCE(SUM(paid_amount), 0) as paid,
+        COALESCE(SUM(total_amount - paid_amount), 0) as debt
       FROM transactions
     `);
 
@@ -119,8 +121,8 @@ export default function Sales() {
     const result = db.exec(`
       SELECT
         COALESCE(SUM(total_amount), 0) as total,
-        COALESCE(SUM(CASE WHEN payment_status = 'fully_paid' THEN total_amount ELSE 0 END), 0) as paid,
-        COALESCE(SUM(CASE WHEN payment_status = 'debt' THEN total_amount ELSE 0 END), 0) as debt
+        COALESCE(SUM(paid_amount), 0) as paid,
+        COALESCE(SUM(total_amount - paid_amount), 0) as debt
       FROM transactions
       WHERE customer_id = ?
     `, [parseInt(customerId, 10)]);
@@ -131,6 +133,11 @@ export default function Sales() {
     } else {
       setCustomerSummary({ total: 0, paid: 0, debt: 0 });
     }
+  };
+
+  const resolveItemUnitPrice = (item: CartItem) => {
+    const candidate = Number(item.unitPrice);
+    return Number.isFinite(candidate) && candidate >= 0 ? candidate : item.product.sell_price;
   };
 
   const addToCart = (product: Product) => {
@@ -146,7 +153,7 @@ export default function Sales() {
           : item
       ));
     } else {
-      setCart([...cart, { product, quantity: 1 }]);
+      setCart([...cart, { product, quantity: 1, unitPrice: product.sell_price }]);
     }
     setIsProductDialogOpen(false);
     toast.success(t("sales.toast.added"));
@@ -176,7 +183,19 @@ export default function Sales() {
   };
 
   const calculateTotal = () => {
-    return cart.reduce((sum, item) => sum + (item.product.sell_price * item.quantity), 0);
+    return cart.reduce((sum, item) => sum + (resolveItemUnitPrice(item) * item.quantity), 0);
+  };
+
+  const updateCartPrice = (productId: number, price: number) => {
+    if (!Number.isFinite(price) || price < 0) {
+      toast.error(t("sales.toast.invalidPrice", { defaultValue: "Enter a valid price" }));
+      return;
+    }
+    setCart(cart.map(item =>
+      item.product.id === productId
+        ? { ...item, unitPrice: price }
+        : item
+    ));
   };
 
   const handleNewCustomerFieldChange = (
@@ -253,20 +272,32 @@ export default function Sales() {
     const customerIdForReload = selectedCustomerId;
 
     try {
+      const paidAmount = saleType === 'fully_paid' ? total : 0;
       db.run(
-        'INSERT INTO transactions (customer_id, total_amount, payment_status) VALUES (?, ?, ?)',
-        [customerId, total, saleType]
+        'INSERT INTO transactions (customer_id, total_amount, payment_status, paid_amount) VALUES (?, ?, ?, ?)',
+        [customerId, total, saleType, paidAmount]
       );
 
       const result = db.exec('SELECT last_insert_rowid() as id');
       const transactionId = result[0].values[0][0] as number;
 
+      if (paidAmount > 0) {
+        logPayment(
+          transactionId,
+          paidAmount,
+          saleType === 'fully_paid'
+            ? 'Sale paid in full'
+            : 'Initial payment at sale'
+        );
+      }
+
       cart.forEach(item => {
-        const lineTotal = item.product.sell_price * item.quantity;
+        const unitPrice = resolveItemUnitPrice(item);
+        const lineTotal = unitPrice * item.quantity;
         
         db.run(
           'INSERT INTO transaction_items (transaction_id, product_id, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?)',
-          [transactionId, item.product.id, item.quantity, item.product.sell_price, lineTotal]
+          [transactionId, item.product.id, item.quantity, unitPrice, lineTotal]
         );
         
         db.run(
@@ -274,6 +305,8 @@ export default function Sales() {
           [item.quantity, item.product.id]
         );
       });
+
+      addSaleItemsToMonthlyRestock(db, cart);
 
       saveDatabase();
       toast.success(t("sales.toast.completed"));
@@ -310,19 +343,19 @@ export default function Sales() {
           <Card className="p-4">
             <div className="text-sm text-muted-foreground">{t("sales.total")}</div>
             <div className="text-2xl font-bold text-foreground mt-1">
-              ${salesSummary.total.toFixed(2)}
+              {formatCurrency(salesSummary.total)}
             </div>
           </Card>
           <Card className="p-4">
             <div className="text-sm text-muted-foreground">{t("sales.paid")}</div>
             <div className="text-2xl font-bold text-foreground mt-1">
-              ${salesSummary.paid.toFixed(2)}
+              {formatCurrency(salesSummary.paid)}
             </div>
           </Card>
           <Card className="p-4">
             <div className="text-sm text-muted-foreground">{t("sales.debt")}</div>
             <div className="text-2xl font-bold text-destructive mt-1">
-              ${salesSummary.debt.toFixed(2)}
+              {formatCurrency(salesSummary.debt)}
             </div>
           </Card>
         </div>
@@ -419,19 +452,19 @@ export default function Sales() {
               <Card className="p-3">
                 <div className="text-xs text-muted-foreground">{t("sales.customerTotal", { defaultValue: `${selectedCustomer.name}'s Total`, values: { name: selectedCustomer.name } })}</div>
                 <div className="text-lg font-semibold mt-1">
-                  ${customerSummary.total.toFixed(2)}
+                  {formatCurrency(customerSummary.total)}
                 </div>
               </Card>
               <Card className="p-3">
                 <div className="text-xs text-muted-foreground">{t("sales.paid")}</div>
                 <div className="text-lg font-semibold mt-1">
-                  ${customerSummary.paid.toFixed(2)}
+                  {formatCurrency(customerSummary.paid)}
                 </div>
               </Card>
               <Card className="p-3">
                 <div className="text-xs text-muted-foreground">{t("sales.debt")}</div>
                 <div className="text-lg font-semibold text-destructive mt-1">
-                  ${customerSummary.debt.toFixed(2)}
+                  {formatCurrency(customerSummary.debt)}
                 </div>
               </Card>
             </div>
@@ -515,7 +548,7 @@ export default function Sales() {
                     <div>
                       <div className="font-medium">{product.name}</div>
                       <div className="text-sm text-muted-foreground">
-                        {t("depot.form.quantity")}: {product.quantity} • ${product.sell_price.toFixed(2)}
+                        {t("depot.form.quantity")}: {product.quantity} • {formatCurrency(product.sell_price)}
                       </div>
                     </div>
                     <Plus className="h-5 w-5 text-primary" />
@@ -543,7 +576,10 @@ export default function Sales() {
                 <div className="flex-1">
                   <h3 className="font-semibold">{item.product.name}</h3>
                   <p className="text-sm text-muted-foreground">
-                    {t("sales.unitPrice", { defaultValue: `${item.product.sell_price.toFixed(2)} each`, values: { price: item.product.sell_price.toFixed(2) } })}
+                    {t("sales.unitPrice", {
+                      defaultValue: `${formatCurrency(resolveItemUnitPrice(item))} each`,
+                      values: { price: formatCurrency(resolveItemUnitPrice(item)) }
+                    })}
                   </p>
                 </div>
                 <Button
@@ -577,9 +613,20 @@ export default function Sales() {
                 >
                   +
                 </Button>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">{t("sales.priceLabel", { defaultValue: "Price" })}</span>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={resolveItemUnitPrice(item)}
+                    onChange={(e) => updateCartPrice(item.product.id, parseFloat(e.target.value))}
+                    className="w-24 text-center"
+                  />
+                </div>
                 <div className="ml-auto text-right">
                   <div className="font-bold text-lg">
-                    ${(item.product.sell_price * item.quantity).toFixed(2)}
+                    {formatCurrency(resolveItemUnitPrice(item) * item.quantity)}
                   </div>
                 </div>
               </div>
@@ -604,7 +651,7 @@ export default function Sales() {
             <div className="flex justify-between items-center mb-4">
               <span className="text-xl font-bold">{t("sales.total")}</span>
               <span className="text-3xl font-bold text-primary">
-                ${calculateTotal().toFixed(2)}
+                {formatCurrency(calculateTotal())}
               </span>
             </div>
             <Button onClick={completeSale} className="w-full" size="lg">

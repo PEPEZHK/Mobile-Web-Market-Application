@@ -14,14 +14,52 @@ export default function Settings() {
   const { t } = useTranslation();
   const displayName = user?.nickname ?? t("settings.auth.unknownUser", { defaultValue: "unknown user" });
 
-  const handleExport = () => {
+  const handleExport = async () => {
     try {
       const jsonData = exportDatabaseAsJSON();
+      const defaultName = window.prompt(
+        t("settings.backup.filenamePrompt", { defaultValue: "Choose a file name for the export" }),
+        `magazin-proekt-backup-${new Date().toISOString().split('T')[0]}.json`
+      ) || `magazin-proekt-backup-${new Date().toISOString().split('T')[0]}.json`;
+
+      type SaveFilePicker = (options?: {
+        suggestedName?: string;
+        types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+      }) => Promise<{
+        createWritable: () => Promise<{
+          write: (data: Blob) => Promise<void>;
+          close: () => Promise<void>;
+        }>;
+      }>;
+
+      const saveFilePicker: SaveFilePicker | undefined = (window as unknown as { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
+
+      if (saveFilePicker) {
+        try {
+          const handle = await saveFilePicker({
+            suggestedName: defaultName,
+            types: [
+              {
+                description: "JSON",
+                accept: { "application/json": [".json"] }
+              }
+            ]
+          });
+          const writable = await handle.createWritable();
+          await writable.write(new Blob([jsonData], { type: 'application/json' }));
+          await writable.close();
+          toast.success(t("settings.toast.exportSuccess"));
+          return;
+        } catch (pickerError) {
+          console.warn("File picker not used, falling back to download", pickerError);
+        }
+      }
+
       const blob = new Blob([jsonData], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `magazin-proekt-backup-${new Date().toISOString().split('T')[0]}.json`;
+      a.download = defaultName;
       a.click();
       URL.revokeObjectURL(url);
       toast.success(t("settings.toast.exportSuccess"));

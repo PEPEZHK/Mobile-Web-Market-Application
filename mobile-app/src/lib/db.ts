@@ -70,6 +70,7 @@ function createTables(database: Database) {
       customer_id INTEGER,
       total_amount REAL DEFAULT 0,
       payment_status TEXT DEFAULT 'fully_paid',
+      paid_amount REAL DEFAULT 0,
       FOREIGN KEY (customer_id) REFERENCES customers(id)
     );
 
@@ -89,6 +90,15 @@ function createTables(database: Database) {
       nickname TEXT NOT NULL UNIQUE,
       password TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS payment_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (transaction_id) REFERENCES transactions(id)
     );
 
     CREATE TABLE IF NOT EXISTS shopping_lists (
@@ -126,10 +136,25 @@ function createTables(database: Database) {
 function migrateDatabase(database: Database) {
   const result = database.exec("PRAGMA table_info(transactions)");
   const hasPaymentStatus = result[0]?.values.some(column => column[1] === 'payment_status');
+  const hasPaidAmount = result[0]?.values.some(column => column[1] === 'paid_amount');
 
   if (!hasPaymentStatus) {
     database.run("ALTER TABLE transactions ADD COLUMN payment_status TEXT DEFAULT 'fully_paid'");
   }
+
+  if (!hasPaidAmount) {
+    database.run("ALTER TABLE transactions ADD COLUMN paid_amount REAL DEFAULT 0");
+  }
+
+  // Backfill paid amounts for legacy rows
+  database.run(`
+    UPDATE transactions
+    SET paid_amount = CASE
+      WHEN payment_status = 'fully_paid' THEN total_amount
+      ELSE paid_amount
+    END
+    WHERE paid_amount IS NULL OR (paid_amount = 0 AND payment_status = 'fully_paid')
+  `);
 
   database.run(`
     CREATE TABLE IF NOT EXISTS shopping_lists (
@@ -320,6 +345,17 @@ function migrateDatabase(database: Database) {
   if (!nicknameIndexExists) {
     database.run('CREATE UNIQUE INDEX IF NOT EXISTS users_nickname_unique ON users(nickname)');
   }
+
+  database.run(`
+    CREATE TABLE IF NOT EXISTS payment_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      note TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+    )
+  `);
 }
 
 function ensureMetadataTable(database: Database) {
@@ -393,6 +429,15 @@ export function getDatabase(): Database {
   return db;
 }
 
+export function logPayment(transactionId: number, amount: number, note?: string) {
+  const database = getDatabase();
+  database.run(
+    `INSERT INTO payment_logs (transaction_id, amount, note)
+     VALUES (?, ?, ?)`,
+    [transactionId, amount, note ?? null]
+  );
+}
+
 export function exportDatabaseAsJSON(): string {
   const database = getDatabase();
 
@@ -402,6 +447,7 @@ export function exportDatabaseAsJSON(): string {
   const transactionItems = database.exec('SELECT * FROM transaction_items');
   const shoppingLists = database.exec('SELECT * FROM shopping_lists');
   const shoppingListItems = database.exec('SELECT * FROM shopping_list_items');
+  const paymentLogs = database.exec('SELECT * FROM payment_logs');
 
   return JSON.stringify({
     products: products[0]?.values || [],
@@ -409,7 +455,8 @@ export function exportDatabaseAsJSON(): string {
     transactions: transactions[0]?.values || [],
     transaction_items: transactionItems[0]?.values || [],
     shopping_lists: shoppingLists[0]?.values || [],
-    shopping_list_items: shoppingListItems[0]?.values || []
+    shopping_list_items: shoppingListItems[0]?.values || [],
+    payment_logs: paymentLogs[0]?.values || []
   }, null, 2);
 }
 
@@ -424,6 +471,7 @@ export function importDatabaseFromJSON(jsonData: string) {
     database.run('DELETE FROM transactions');
     database.run('DELETE FROM customers');
     database.run('DELETE FROM products');
+    database.run('DELETE FROM payment_logs');
 
     if (data.products) {
       data.products.forEach((row: SqlRow) => {
@@ -445,10 +493,33 @@ export function importDatabaseFromJSON(jsonData: string) {
 
     if (data.transactions) {
       data.transactions.forEach((row: SqlRow) => {
-        const txRow = row.length >= 5 ? row : [...row, 'fully_paid'];
+        const [
+          id,
+          date,
+          customer_id,
+          total_amount,
+          payment_status_raw,
+          paid_amount_raw
+        ] = row;
+
+        const payment_status = payment_status_raw === 'debt' ? 'debt' : 'fully_paid';
+        const normalizedTotal = typeof total_amount === 'number' ? total_amount : Number(total_amount ?? 0) || 0;
+        const paid_amount = typeof paid_amount_raw === 'number'
+          ? paid_amount_raw
+          : payment_status === 'fully_paid'
+            ? normalizedTotal
+            : 0;
+
         database.run(
-          'INSERT INTO transactions VALUES (?, ?, ?, ?, ?)',
-          txRow
+          'INSERT INTO transactions (id, date, customer_id, total_amount, payment_status, paid_amount) VALUES (?, ?, ?, ?, ?, ?)',
+          [
+            id,
+            date ?? new Date().toISOString(),
+            customer_id ?? null,
+            normalizedTotal,
+            payment_status,
+            paid_amount
+          ]
         );
       });
     }
@@ -523,6 +594,15 @@ export function importDatabaseFromJSON(jsonData: string) {
           `INSERT INTO shopping_list_items (id, list_id, product_id, name, quantity_value, quantity_label, estimated_unit_cost, notes, is_completed, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [id, list_id, product_id, name, quantity_value, quantity_label, estimated_unit_cost, notes, is_completed, created_at]
+        );
+      });
+    }
+
+    if (data.payment_logs) {
+      data.payment_logs.forEach((row: SqlRow) => {
+        database.run(
+          'INSERT INTO payment_logs VALUES (?, ?, ?, ?, ?)',
+          row
         );
       });
     }
