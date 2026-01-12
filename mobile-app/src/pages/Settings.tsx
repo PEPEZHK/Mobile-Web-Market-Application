@@ -4,18 +4,22 @@ import { Card } from "@/components/ui/card";
 import { exportDatabaseAsJSON, importDatabaseFromJSON } from "@/lib/db";
 import { Download, Upload, Database, LogOut } from "lucide-react";
 import { toast } from "sonner";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "@/hooks/useTranslation";
 import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ExportDestination, getExportDestination, setExportDestination } from "@/lib/export-preferences";
 
 export default function Settings() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { logout, user } = useAuth();
   const { t } = useTranslation();
   const displayName = user?.nickname ?? t("settings.auth.unknownUser", { defaultValue: "unknown user" });
+  const [exportDestination, setExportDestinationState] = useState<ExportDestination>(() => getExportDestination());
 
   const handleExport = async () => {
     try {
@@ -151,6 +155,12 @@ export default function Settings() {
     }
   };
 
+  const handleExportDestinationChange = (value: string) => {
+    const nextValue = value as ExportDestination;
+    setExportDestinationState(nextValue);
+    setExportDestination(nextValue);
+  };
+
   return (
     <Layout title={t("settings.title")}>
       <div className="space-y-4">
@@ -214,6 +224,34 @@ export default function Settings() {
               <LogOut className="h-4 w-4 mr-2" />
               {t("settings.auth.signOut")}
             </Button>
+          </div>
+        </Card>
+
+        <Card className="p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <Download className="h-6 w-6 text-primary" />
+            <div>
+              <h2 className="text-lg font-semibold">{t("settings.export.title")}</h2>
+              <p className="text-sm text-muted-foreground">
+                {t("settings.export.description")}
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label className="text-sm text-muted-foreground">
+              {t("settings.export.destination.label")}
+            </Label>
+            <Select value={exportDestination} onValueChange={handleExportDestinationChange}>
+              <SelectTrigger>
+                <SelectValue placeholder={t("settings.export.destination.placeholder")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="downloads">{t("settings.export.destination.downloads")}</SelectItem>
+                <SelectItem value="share">{t("settings.export.destination.share")}</SelectItem>
+                <SelectItem value="both">{t("settings.export.destination.both")}</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </Card>
 

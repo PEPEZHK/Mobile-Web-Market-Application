@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -23,7 +23,14 @@ import {
 } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { getDatabase, saveDatabase } from "@/lib/db";
-import { ensureMonthlyRestockList, MONTHLY_RESTOCK_TYPE, syncListItemsToDepot, transferMonthlyRestock, UNASSIGNED_CUSTOMER_VALUE } from "@/lib/shopping";
+import {
+  MONTHLY_RESTOCK_TYPE,
+  rollbackLatestListTransfer,
+  syncListItemsToDepot,
+  syncMonthlyRestockFromDepot,
+  transferMonthlyRestock,
+  UNASSIGNED_CUSTOMER_VALUE
+} from "@/lib/shopping";
 import { Customer, ShoppingList, ShoppingListWithStats } from "@/types";
 import { useTranslation } from "@/hooks/useTranslation";
 import {
@@ -32,6 +39,7 @@ import {
   ListPlus,
   MoreHorizontal,
   Pencil,
+  RefreshCcw,
   Trash2
 } from "lucide-react";
 import { toast } from "sonner";
@@ -158,7 +166,7 @@ export default function ShoppingListPage() {
 
   const loadLists = () => {
     const db = getDatabase();
-    const monthlyListId = ensureMonthlyRestockList(db);
+    syncMonthlyRestockFromDepot(db);
     saveDatabase();
     const listResult = db.exec(`
       SELECT l.id, l.title, l.type, l.status, l.priority, l.notes, l.customer_id, c.name, l.due_date, l.created_at
@@ -177,6 +185,20 @@ export default function ShoppingListPage() {
       LEFT JOIN products p ON p.id = li.product_id
       GROUP BY li.list_id
     `);
+
+    const backupResult = db.exec(`
+      SELECT list_id, COUNT(*) as pending_backups
+      FROM shopping_list_transfers
+      WHERE reverted_at IS NULL
+      GROUP BY list_id
+    `);
+
+    const backups = new Map<number, number>();
+    if (backupResult[0]) {
+      backupResult[0].values.forEach(row => {
+        backups.set(row[0] as number, Number(row[1] ?? 0));
+      });
+    }
 
     const aggregates = new Map<number, { pending: number; completed: number; estimated: number; pendingEstimated: number }>();
     if (aggregateResult[0]) {
@@ -207,7 +229,8 @@ export default function ShoppingListPage() {
             pending_count: aggregate?.pending ?? 0,
             completed_count: aggregate?.completed ?? 0,
             estimated_total: aggregate?.estimated ?? 0,
-            pending_estimated_total: aggregate?.pendingEstimated ?? 0
+            pending_estimated_total: aggregate?.pendingEstimated ?? 0,
+            has_backup: (backups.get(row[0] as number) ?? 0) > 0
           };
         })
       : [];
@@ -367,7 +390,7 @@ export default function ShoppingListPage() {
 
   const handleTransferMonthlyRestock = () => {
     const db = getDatabase();
-    const listId = monthlyRestock?.id ?? ensureMonthlyRestockList(db);
+    const listId = monthlyRestock?.id ?? syncMonthlyRestockFromDepot(db);
     const transferResult = transferMonthlyRestock(db, listId);
     saveDatabase();
     toast.success(
@@ -375,6 +398,41 @@ export default function ShoppingListPage() {
         values: { count: transferResult.updatedProducts || transferResult.totalQuantity }
       })
     );
+    loadLists();
+  };
+
+  const handleRestoreInventory = (list: ShoppingListWithStats) => {
+    const confirmed = window.confirm(
+      t("shopping.confirm.restoreInventory", { values: { title: list.title } })
+    );
+    if (!confirmed) return;
+
+    const db = getDatabase();
+    const result = rollbackLatestListTransfer(db, list.id);
+
+    if (result.status === "success") {
+      saveDatabase();
+      toast.success(
+        t("shopping.toast.inventoryRestored", {
+          values: { count: result.updatedProducts }
+        })
+      );
+    } else if (result.status === "insufficient_stock") {
+      toast.error(
+        t("shopping.toast.inventoryRestoreInsufficient", {
+          values: { count: result.insufficientProducts }
+        })
+      );
+    } else if (result.status === "missing_products") {
+      toast.error(
+        t("shopping.toast.inventoryRestoreMissing", {
+          values: { count: result.missingProducts }
+        })
+      );
+    } else {
+      toast.error(t("shopping.toast.inventoryRestoreUnavailable"));
+    }
+
     loadLists();
   };
 
@@ -567,9 +625,16 @@ export default function ShoppingListPage() {
                         placeholder={t("shopping.form.notesPlaceholder")}
                       />
                     </div>
-                    <Button type="submit" className="w-full">
-                      {editingListId ? t("shopping.form.submit.save") : t("shopping.form.submit.create")}
-                    </Button>
+                    <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
+                      <DialogClose asChild>
+                        <Button type="button" variant="outline" className="w-full sm:w-auto">
+                          {t("common.cancel")}
+                        </Button>
+                      </DialogClose>
+                      <Button type="submit" className="w-full sm:w-auto">
+                        {editingListId ? t("shopping.form.submit.save") : t("shopping.form.submit.create")}
+                      </Button>
+                    </div>
                   </form>
                 </DialogContent>
               </Dialog>
@@ -676,6 +741,12 @@ export default function ShoppingListPage() {
                                 <DropdownMenuItem onSelect={() => handleToggleListStatus(list)}>
                                   <CheckCircle2 className="mr-2 h-4 w-4" />
                                   {t("shopping.actions.markCompleted")}
+                                </DropdownMenuItem>
+                              )}
+                              {list.has_backup && (
+                                <DropdownMenuItem onSelect={() => handleRestoreInventory(list)}>
+                                  <RefreshCcw className="mr-2 h-4 w-4" />
+                                  {t("shopping.actions.restoreInventory")}
                                 </DropdownMenuItem>
                               )}
                               <DropdownMenuItem

@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogHeader,
@@ -30,9 +31,17 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
-import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
+import { exportSheetsAsExcel } from "@/lib/export-excel";
 import { getDatabase, saveDatabase } from "@/lib/db";
-import { MONTHLY_RESTOCK_TYPE, syncListItemsToDepot, transferMonthlyRestock, UNASSIGNED_CUSTOMER_VALUE } from "@/lib/shopping";
+import {
+  ensureMonthlyRestockList,
+  MONTHLY_RESTOCK_TYPE,
+  rollbackLatestListTransfer,
+  syncListItemsToDepot,
+  syncMonthlyRestockFromDepot,
+  transferMonthlyRestock,
+  UNASSIGNED_CUSTOMER_VALUE
+} from "@/lib/shopping";
 import {
   Customer,
   Product,
@@ -56,10 +65,10 @@ import { formatCurrency } from "@/lib/utils";
 interface ItemFormState {
   name: string;
   productId: string;
-  quantityValue: number;
+  quantityValue: string;
   quantityLabel: string;
-  estimatedUnitCost: number;
-  sellPrice: number;
+  estimatedUnitCost: string;
+  sellPrice: string;
   category: string;
   notes: string;
 }
@@ -77,10 +86,10 @@ interface ListFormState {
 const defaultItemForm: ItemFormState = {
   name: "",
   productId: "",
-  quantityValue: 1,
+  quantityValue: "1",
   quantityLabel: "",
-  estimatedUnitCost: 0,
-  sellPrice: 0,
+  estimatedUnitCost: "0",
+  sellPrice: "0",
   category: "",
   notes: ""
 };
@@ -109,6 +118,34 @@ function formatDate(value?: string | null): string | null {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleDateString();
+}
+
+function parseNumberInput(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const noSpaces = trimmed.replace(/\s+/g, "").replace(/'/g, "");
+  const lastComma = noSpaces.lastIndexOf(",");
+  const lastDot = noSpaces.lastIndexOf(".");
+  let normalized = noSpaces;
+
+  if (lastComma > -1 && lastDot > -1) {
+    if (lastComma > lastDot) {
+      normalized = noSpaces.replace(/\./g, "").replace(",", ".");
+    } else {
+      normalized = noSpaces.replace(/,/g, "");
+    }
+  } else if (lastComma > -1) {
+    const digitsAfter = noSpaces.length - lastComma - 1;
+    normalized = digitsAfter === 3 ? noSpaces.replace(/,/g, "") : noSpaces.replace(/,/g, ".");
+  } else if (lastDot > -1) {
+    const digitsAfter = noSpaces.length - lastDot - 1;
+    if (digitsAfter === 3) {
+      normalized = noSpaces.replace(/\./g, "");
+    }
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function priorityVariant(priority: ShoppingList["priority"]): "outline" | "default" | "destructive" {
@@ -240,6 +277,11 @@ export default function ShoppingListDetailPage() {
 
   const loadList = (targetListId: number) => {
     const db = getDatabase();
+    const monthlyListId = ensureMonthlyRestockList(db);
+    if (monthlyListId === targetListId) {
+      syncMonthlyRestockFromDepot(db);
+      saveDatabase();
+    }
     const result = db.exec(`
       SELECT l.id, l.title, l.type, l.status, l.priority, l.notes, l.customer_id, c.name, l.due_date, l.created_at,
         SUM(CASE WHEN li.is_completed = 0 THEN 1 ELSE 0 END) as pending_count,
@@ -259,6 +301,12 @@ export default function ShoppingListDetailPage() {
       return;
     }
 
+    const backupResult = db.exec(
+      `SELECT COUNT(*) FROM shopping_list_transfers WHERE list_id = ? AND reverted_at IS NULL`,
+      [targetListId]
+    );
+    const hasBackup = Number(backupResult[0]?.values?.[0]?.[0] ?? 0) > 0;
+
     const row = result[0].values[0];
     setList({
       id: row[0] as number,
@@ -274,7 +322,8 @@ export default function ShoppingListDetailPage() {
       pending_count: Number(row[10] ?? 0),
       completed_count: Number(row[11] ?? 0),
       estimated_total: Number(row[12] ?? 0),
-      pending_estimated_total: Number(row[13] ?? 0)
+      pending_estimated_total: Number(row[13] ?? 0),
+      has_backup: hasBackup
     });
   };
 
@@ -359,7 +408,7 @@ export default function ShoppingListDetailPage() {
     }
   };
 
-  const handleItemFormChange = (field: keyof ItemFormState, value: string | number) => {
+  const handleItemFormChange = (field: keyof ItemFormState, value: string) => {
     setItemForm(prev => ({
       ...prev,
       [field]: value
@@ -377,8 +426,8 @@ export default function ShoppingListDetailPage() {
       ...prev,
       productId: value,
       name: product ? product.name : prev.name,
-      estimatedUnitCost: product ? product.buy_price : prev.estimatedUnitCost,
-      sellPrice: product ? product.sell_price : prev.sellPrice,
+      estimatedUnitCost: product ? String(product.buy_price ?? 0) : prev.estimatedUnitCost,
+      sellPrice: product ? String(product.sell_price ?? 0) : prev.sellPrice,
       category: product?.category || prev.category
     }));
   };
@@ -396,13 +445,14 @@ export default function ShoppingListDetailPage() {
     }
 
     const db = getDatabase();
-    const quantityValue = Number.isFinite(Number(itemForm.quantityValue)) ? Number(itemForm.quantityValue) : 1;
-    const estimatedUnitCost = Number.isFinite(Number(itemForm.estimatedUnitCost))
-      ? Number(itemForm.estimatedUnitCost)
-      : 0;
-    const sellPriceValue = Number.isFinite(Number(itemForm.sellPrice))
-      ? Number(itemForm.sellPrice)
-      : 0;
+    const quantityParsed = parseNumberInput(itemForm.quantityValue);
+    if (quantityParsed === null) {
+      toast.error(t("shopping.detail.toast.itemQuantityRequired", { defaultValue: "Enter a valid quantity." }));
+      return;
+    }
+    const quantityValue = quantityParsed;
+    const estimatedUnitCost = parseNumberInput(itemForm.estimatedUnitCost) ?? 0;
+    const sellPriceValue = parseNumberInput(itemForm.sellPrice) ?? 0;
     const categoryValue = itemForm.category.trim() || null;
     const productId = itemForm.productId ? Number(itemForm.productId) : null;
 
@@ -594,6 +644,43 @@ export default function ShoppingListDetailPage() {
     loadItems(list.id);
   };
 
+  const handleRestoreInventory = () => {
+    if (!list) return;
+    const confirmed = window.confirm(
+      t("shopping.confirm.restoreInventory", { values: { title: list.title } })
+    );
+    if (!confirmed) return;
+
+    const db = getDatabase();
+    const result = rollbackLatestListTransfer(db, list.id);
+
+    if (result.status === "success") {
+      saveDatabase();
+      toast.success(
+        t("shopping.toast.inventoryRestored", {
+          values: { count: result.updatedProducts }
+        })
+      );
+    } else if (result.status === "insufficient_stock") {
+      toast.error(
+        t("shopping.toast.inventoryRestoreInsufficient", {
+          values: { count: result.insufficientProducts }
+        })
+      );
+    } else if (result.status === "missing_products") {
+      toast.error(
+        t("shopping.toast.inventoryRestoreMissing", {
+          values: { count: result.missingProducts }
+        })
+      );
+    } else {
+      toast.error(t("shopping.toast.inventoryRestoreUnavailable"));
+    }
+
+    loadList(list.id);
+    loadItems(list.id);
+  };
+
   const handleTransferNow = () => {
     if (!list || !isMonthlyRestock) return;
     const db = getDatabase();
@@ -613,10 +700,10 @@ export default function ShoppingListDetailPage() {
     setItemForm({
       name: item.name,
       productId: item.product_id ? String(item.product_id) : "",
-      quantityValue: item.quantity_value,
+      quantityValue: String(item.quantity_value ?? 1),
       quantityLabel: item.quantity_label ?? "",
-      estimatedUnitCost: item.estimated_unit_cost || item.product_buy_price || 0,
-      sellPrice: item.sell_price ?? item.product_sell_price ?? 0,
+      estimatedUnitCost: String(item.estimated_unit_cost || item.product_buy_price || 0),
+      sellPrice: String(item.sell_price ?? item.product_sell_price ?? 0),
       category: item.category || item.product_category || "",
       notes: item.notes ?? ""
     });
@@ -629,78 +716,55 @@ export default function ShoppingListDetailPage() {
       return;
     }
 
-    const summaryRows: Array<Array<string | number>> = [
-      [t("shopping.detail.export.columns.listName"), list.title],
-      [t("shopping.detail.export.columns.type"), listTypeLabel(list.type)],
-      [t("shopping.detail.export.columns.status"), statusLabel(list.status)],
-      [t("shopping.detail.export.columns.priority"), priorityLabel(list.priority)],
-      [
-        t("shopping.detail.export.columns.totalItems"),
-        (list.pending_count + list.completed_count).toString()
-      ],
-      [t("shopping.detail.export.columns.pendingItems"), list.pending_count.toString()],
-      [t("shopping.detail.export.columns.completedItems"), list.completed_count.toString()],
-      [t("shopping.detail.export.columns.estimatedTotal"), formatMoney(totalEstimatedCost)],
-      [t("shopping.detail.export.columns.pendingBudget"), formatMoney(pendingEstimatedCost)]
+    const itemHeader = [
+      t("shopping.detail.export.columns.itemName"),
+      t("shopping.detail.export.columns.itemCategory"),
+      t("shopping.detail.export.columns.itemQuantity"),
+      t("shopping.detail.export.columns.itemBuyPrice"),
+      t("shopping.detail.export.columns.itemSellPrice"),
+      t("shopping.detail.export.columns.itemUnitCost"),
+      t("shopping.detail.export.columns.itemEstimatedTotal")
     ];
 
-    if (list.customer_name) {
-      summaryRows.push([t("shopping.detail.export.columns.customer"), list.customer_name]);
-    }
+    const buildItemRows = (sourceItems: ShoppingListItemWithProduct[]) => {
+      return sourceItems.map(item => {
+        const buyPrice = item.product_buy_price ?? item.estimated_unit_cost ?? 0;
+        const sellPrice = item.sell_price ?? item.product_sell_price ?? 0;
+        const unitCost = item.estimated_unit_cost > 0
+          ? item.estimated_unit_cost
+          : item.product_buy_price ?? 0;
+        const itemTotal = unitCost * item.quantity_value;
+        return [
+          item.name,
+          item.category || item.product_category || "-",
+          item.quantity_value,
+          buyPrice,
+          sellPrice,
+          unitCost,
+          itemTotal
+        ];
+      });
+    };
 
-    const dueDateText = formatDate(list.due_date);
-    if (dueDateText) {
-      summaryRows.push([t("shopping.detail.export.columns.dueDate"), dueDateText]);
-    }
+    const rows: Array<Array<string | number>> = [
+      [t("shopping.detail.export.columns.listName"), list.title],
+      [],
+      [t("shopping.detail.export.columns.pendingItems"), pendingItems.length],
+      itemHeader,
+      ...buildItemRows(pendingItems),
+      [],
+      [t("shopping.detail.export.columns.completedItems"), completedItems.length],
+      itemHeader,
+      ...buildItemRows(completedItems),
+      [],
+      [t("shopping.detail.export.columns.status"), statusLabel(list.status)],
+      [t("shopping.detail.export.columns.estimatedTotal"), totalEstimatedCost],
+      [t("shopping.detail.export.columns.pendingBudget"), pendingEstimatedCost]
+    ];
 
-    if (list.notes) {
-      summaryRows.push([t("shopping.detail.export.columns.notes"), list.notes]);
-    }
-
-    const itemRows: Array<Array<string | number>> = [[
-      t("shopping.detail.export.columns.itemName"),
-      t("shopping.detail.export.columns.itemQuantity"),
-      t("shopping.detail.export.columns.itemUnit"),
-      t("shopping.detail.export.columns.itemUnitCost"),
-      t("shopping.detail.export.columns.itemSellPrice", { defaultValue: "Sell price" }),
-      t("shopping.detail.export.columns.itemEstimatedTotal"),
-      t("shopping.detail.export.columns.itemLinkedProduct"),
-      t("shopping.detail.export.columns.category", { defaultValue: "Category" }),
-      t("shopping.detail.export.columns.itemStatus"),
-      t("shopping.detail.export.columns.notes"),
-      t("shopping.detail.export.columns.created")
-    ]];
-
-    items.forEach(item => {
-      const unitCost = item.estimated_unit_cost > 0
-        ? item.estimated_unit_cost
-        : item.product_buy_price ?? 0;
-      const itemTotal = unitCost * item.quantity_value;
-      const sellPrice = item.sell_price ?? item.product_sell_price ?? 0;
-      itemRows.push([
-        item.name,
-        item.quantity_value,
-        item.quantity_label || "-",
-        formatMoney(unitCost),
-        formatMoney(sellPrice),
-        formatMoney(itemTotal),
-        item.product_name ? `${item.product_name}` : "-",
-        item.category || item.product_category || "-",
-        item.is_completed === 1
-          ? t("shopping.itemStatus.completed")
-          : t("shopping.itemStatus.pending"),
-        item.notes || "-",
-        new Date(item.created_at).toLocaleString()
-      ]);
-    });
-
-    saveExcelUsingShareSheet(
-      `${list.title.replace(/\s+/g, "_").toLowerCase()}_shopping_list.xls`,
-      [
-        { name: t("shopping.detail.export.summarySheet"), rows: summaryRows },
-        { name: t("shopping.detail.export.itemsSheet"), rows: itemRows }
-      ],
-      { action: "both" }
+    exportSheetsAsExcel(
+      `${list.title.replace(/\s+/g, "_").toLowerCase()}_shopping_list.xlsx`,
+      [{ name: t("shopping.detail.export.summarySheet"), rows }]
     ).catch(() => toast.error(t("shopping.detail.toast.listSaveError")));
   };
 
@@ -738,7 +802,7 @@ export default function ShoppingListDetailPage() {
             <ArrowLeft className="mr-2 h-4 w-4" />
             {t("shopping.actions.back")}
           </Button>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={handleExportList}>
               <Download className="mr-2 h-4 w-4" />
               {t("shopping.actions.export")}
@@ -772,6 +836,12 @@ export default function ShoppingListDetailPage() {
                     {list.status === "completed"
                       ? t("shopping.actions.reopen")
                       : t("shopping.actions.markCompleted")}
+                  </DropdownMenuItem>
+                )}
+                {list.has_backup && (
+                  <DropdownMenuItem onSelect={handleRestoreInventory}>
+                    <RefreshCcw className="mr-2 h-4 w-4" />
+                    {t("shopping.actions.restoreInventory")}
                   </DropdownMenuItem>
                 )}
                 {!isMonthlyRestock && (
@@ -916,7 +986,8 @@ export default function ShoppingListDetailPage() {
                       min="0"
                       step="0.01"
                       value={itemForm.quantityValue}
-                      onChange={event => handleItemFormChange("quantityValue", Number(event.target.value))}
+                      onChange={event => handleItemFormChange("quantityValue", event.target.value)}
+                      required
                     />
                   </div>
                   <div className="space-y-2">
@@ -937,7 +1008,7 @@ export default function ShoppingListDetailPage() {
                       min="0"
                       step="0.01"
                       value={itemForm.estimatedUnitCost}
-                      onChange={event => handleItemFormChange("estimatedUnitCost", Number(event.target.value))}
+                      onChange={event => handleItemFormChange("estimatedUnitCost", event.target.value)}
                     />
                   </div>
                   <div className="space-y-2">
@@ -948,7 +1019,7 @@ export default function ShoppingListDetailPage() {
                       min="0"
                       step="0.01"
                       value={itemForm.sellPrice}
-                      onChange={event => handleItemFormChange("sellPrice", Number(event.target.value))}
+                      onChange={event => handleItemFormChange("sellPrice", event.target.value)}
                     />
                   </div>
                 </div>
@@ -962,11 +1033,18 @@ export default function ShoppingListDetailPage() {
                     placeholder={t("shopping.detail.form.notesPlaceholder")}
                   />
                 </div>
-                <Button type="submit" className="w-full">
-                  {editingItemId
-                    ? t("shopping.detail.form.submit.save")
-                    : t("shopping.detail.form.submit.add")}
-                </Button>
+                <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
+                  <DialogClose asChild>
+                    <Button type="button" variant="outline" className="w-full sm:w-auto">
+                      {t("common.cancel")}
+                    </Button>
+                  </DialogClose>
+                  <Button type="submit" className="w-full sm:w-auto">
+                    {editingItemId
+                      ? t("shopping.detail.form.submit.save")
+                      : t("shopping.detail.form.submit.add")}
+                  </Button>
+                </div>
               </form>
             </DialogContent>
           </Dialog>
@@ -1256,9 +1334,16 @@ export default function ShoppingListDetailPage() {
                 placeholder={t("shopping.form.notesPlaceholder")}
               />
             </div>
-            <Button type="submit" className="w-full">
-              {t("shopping.form.submit.save")}
-            </Button>
+            <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
+              <DialogClose asChild>
+                <Button type="button" variant="outline" className="w-full sm:w-auto">
+                  {t("common.cancel")}
+                </Button>
+              </DialogClose>
+              <Button type="submit" className="w-full sm:w-auto">
+                {t("shopping.form.submit.save")}
+              </Button>
+            </div>
           </form>
         </DialogContent>
       </Dialog>

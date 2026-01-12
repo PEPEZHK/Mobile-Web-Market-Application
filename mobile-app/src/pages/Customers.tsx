@@ -3,7 +3,7 @@ import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { getDatabase, logPayment, saveDatabase } from "@/lib/db";
@@ -13,7 +13,7 @@ import { Plus, Phone, Pencil, Download, ChevronDown, ChevronUp, Trash2 } from "l
 import { toast } from "sonner";
 import { useTranslation } from "@/hooks/useTranslation";
 import { formatCurrency } from "@/lib/utils";
-import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
+import { exportSheetsAsExcel } from "@/lib/export-excel";
 
 interface CustomerTransactionItem {
   product_name: string;
@@ -361,10 +361,10 @@ export default function Customers() {
       })
     ];
 
-    saveExcelUsingShareSheet(`${customer.name.replace(/[^a-z0-9]/gi, "_")}_${t("customers.export.reportSuffix")}.xls`, [
+    exportSheetsAsExcel(`${customer.name.replace(/[^a-z0-9]/gi, "_")}_${t("customers.export.reportSuffix")}.xlsx`, [
       { name: t("customers.export.summarySheet"), rows: summaryRows },
       { name: t("customers.export.transactionsSheet"), rows: transactionRows }
-    ], { action: "both" }).catch(() => toast.error(t("customers.toast.noExport")));
+    ]).catch(() => toast.error(t("customers.toast.noExport")));
   };
 
   const exportAllCustomers = () => {
@@ -411,9 +411,9 @@ export default function Customers() {
       });
     }
 
-    saveExcelUsingShareSheet(`${t("customers.export.overviewFilename")}.xls`, [
+    exportSheetsAsExcel(`${t("customers.export.overviewFilename")}.xlsx`, [
       { name: t("customers.export.overviewSheet"), rows }
-    ], { action: "both" }).catch(() => toast.error(t("customers.toast.noExport")));
+    ]).catch(() => toast.error(t("customers.toast.noExport")));
   };
 
   const filteredCustomers = customers.filter(c =>
@@ -461,20 +461,29 @@ export default function Customers() {
                     <Label htmlFor="notes">{t("customers.form.notes")}</Label>
                     <Textarea id="notes" name="notes" defaultValue={editingCustomer?.notes} rows={3} />
                   </div>
-                  <Button type="submit" className="w-full">{t("customers.form.save")}</Button>
+                  <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
+                    <DialogClose asChild>
+                      <Button type="button" variant="outline" className="w-full sm:w-auto">
+                        {t("common.cancel")}
+                      </Button>
+                    </DialogClose>
+                    <Button type="submit" className="w-full sm:w-auto">
+                      {t("customers.form.save")}
+                    </Button>
+                  </div>
                 </form>
               </DialogContent>
             </Dialog>
           </div>
-          <div className="flex gap-2 w-full sm:w-auto">
-            <Button variant="outline" onClick={exportAllCustomers} className="flex-1 sm:flex-none">
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            <Button variant="outline" onClick={exportAllCustomers} className="w-full sm:w-auto">
               <Download className="h-4 w-4 mr-2" />
               {t("customers.export.all")}
             </Button>
             <Button
               variant="destructive"
               onClick={handleDeleteAllCustomers}
-              className="flex-1 sm:flex-none"
+              className="w-full sm:w-auto"
               disabled={customers.length === 0}
             >
               <Trash2 className="h-4 w-4 mr-2" />
@@ -489,7 +498,7 @@ export default function Customers() {
             return (
               <Card key={customer.id} className="p-4">
                 <div className="flex flex-col gap-3">
-                  <div className="flex justify-between items-start gap-4">
+                  <div className="flex flex-col sm:flex-row sm:justify-between items-start gap-4">
                     <div className="flex-1">
                       <h3 className="font-semibold text-lg text-foreground">{customer.name}</h3>
                       {customer.phone && (
@@ -502,8 +511,8 @@ export default function Customers() {
                         <p className="text-sm text-muted-foreground mt-2">{customer.notes}</p>
                       )}
                     </div>
-                    <div className="flex flex-col gap-2 items-end">
-                      <div className="flex gap-2">
+                    <div className="flex flex-col gap-2 items-start sm:items-end">
+                      <div className="flex flex-wrap gap-2 justify-start sm:justify-end">
                         <Button
                           variant="outline"
                           size="sm"
@@ -539,7 +548,7 @@ export default function Customers() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-muted-foreground"
+                        className="text-muted-foreground w-full justify-start sm:w-auto sm:justify-end"
                         onClick={() => {
                           const nextId = expandedCustomerId === customer.id ? null : customer.id;
                           setExpandedCustomerId(nextId);

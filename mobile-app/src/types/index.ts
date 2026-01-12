@@ -75,6 +75,7 @@ export interface ShoppingListWithStats extends ShoppingList {
   completed_count: number;
   estimated_total: number;
   pending_estimated_total: number;
+  has_backup?: boolean;
 }
 
 export interface ShoppingListItemWithProduct extends ShoppingListItem {

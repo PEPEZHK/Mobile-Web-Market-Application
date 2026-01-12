@@ -1,9 +1,16 @@
 import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
-import { createExcelBlob, downloadExcelFile, WorksheetData } from "@/lib/excel";
+import {
+  createExcelBlob,
+  createExcelBuffers,
+  downloadExcelFile,
+  WorksheetData,
+  EXCEL_MIME_TYPE,
+} from "@/lib/excel";
 import { ExcelDownloads } from "@/capacitor/ExcelDownloads"; // <-- IMPORTANT
 
+// Keep for compatibility if other imports exist
 export async function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -26,14 +33,15 @@ export async function blobToBase64(blob: Blob): Promise<string> {
 }
 
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\x00-\x1F]/g;
+const EXCEL_EXTENSION = ".xlsx";
 
 function ensureSafeXlsName(fileName: string): string {
   const trimmed = fileName?.trim() || "export";
-  const withExtension = trimmed.toLowerCase().endsWith(".xls")
+  const normalized = trimmed.toLowerCase().endsWith(EXCEL_EXTENSION)
     ? trimmed
-    : `${trimmed}.xls`;
+    : trimmed.replace(/\.json$/i, "").replace(/\.xls$/i, "").concat(EXCEL_EXTENSION);
 
-  return withExtension.replace(INVALID_FILENAME_CHARS, "_");
+  return normalized.replace(INVALID_FILENAME_CHARS, "_");
 }
 
 type SaveOptions = {
@@ -65,8 +73,9 @@ export async function saveExcelUsingShareSheet(
 ): Promise<void> {
   const action = options?.action ?? "both";
   const safeName = ensureSafeXlsName(suggestedName);
-  const blob = createExcelBlob(sheets);
-  if (!blob) throw new Error("No data to export");
+  const buffers = createExcelBuffers(sheets);
+  if (!buffers) throw new Error("No data to export");
+  const blob = new Blob([buffers.arrayBuffer], { type: EXCEL_MIME_TYPE });
 
   const platform = Capacitor.getPlatform(); // "ios" | "android" | "web"
 
@@ -89,7 +98,7 @@ export async function saveExcelUsingShareSheet(
   }
 
   try {
-    const base64 = await blobToBase64(blob);
+    const base64 = buffers.base64;
 
     // === ANDROID: use ExcelDownloads to write into public Downloads ===
     if (platform === "android") {
@@ -98,7 +107,7 @@ export async function saveExcelUsingShareSheet(
         const { uri } = await ExcelDownloads.saveToDownloads({
           fileName: safeName,
           base64,
-          mimeType: "application/vnd.ms-excel",
+          mimeType: EXCEL_MIME_TYPE,
         });
 
         console.info("[saveExcelUsingShareSheet] ANDROID: Excel saved to Downloads, uri:", uri);
@@ -148,7 +157,6 @@ export async function saveExcelUsingShareSheet(
       path: cachePath,
       data: base64,
       directory: Directory.Cache,
-      encoding: "base64",
       recursive: true,
     });
 
@@ -166,7 +174,6 @@ export async function saveExcelUsingShareSheet(
           path: documentsPath,
           data: base64,
           directory: Directory.Documents,
-          encoding: "base64",
           recursive: true,
         });
 

@@ -1,9 +1,9 @@
-import { useState, useEffect, FormEvent, ChangeEvent, useCallback } from "react";
+import { useState, useEffect, FormEvent, ChangeEvent, useCallback, useMemo } from "react";
 import { Layout } from "@/components/Layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -16,7 +16,7 @@ import { toast } from "sonner";
 import type { Database } from "sql.js";
 import { useTranslation } from "@/hooks/useTranslation";
 import { formatCurrency } from "@/lib/utils";
-import { addSaleItemsToMonthlyRestock } from "@/lib/shopping";
+import { syncMonthlyRestockFromDepot } from "@/lib/shopping";
 
 export default function Sales() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -26,7 +26,9 @@ export default function Sales() {
   const [isProductDialogOpen, setIsProductDialogOpen] = useState(false);
   const [productSearchQuery, setProductSearchQuery] = useState("");
   const [cartSearchQuery, setCartSearchQuery] = useState("");
-  const [saleType, setSaleType] = useState<'fully_paid' | 'debt'>('fully_paid');
+  const [searchMode, setSearchMode] = useState<"item" | "category">("item");
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [saleType, setSaleType] = useState<'fully_paid' | 'debt'>('debt');
   const [salesSummary, setSalesSummary] = useState({ total: 0, paid: 0, debt: 0 });
   const [customerSummary, setCustomerSummary] = useState({ total: 0, paid: 0, debt: 0 });
   const [isCustomerPickerOpen, setIsCustomerPickerOpen] = useState(false);
@@ -87,11 +89,32 @@ export default function Sales() {
   }, [loadData]);
 
   useEffect(() => {
-    if (!selectedCustomerId && saleType === 'debt') {
-      setSaleType('fully_paid');
-    }
     updateCustomerSales(selectedCustomerId);
   }, [selectedCustomerId, saleType]);
+
+  useEffect(() => {
+    if (searchMode === "item" && selectedCategory) {
+      setSelectedCategory(null);
+    }
+  }, [searchMode, selectedCategory]);
+
+  const categories = useMemo(() => {
+    const unique = new Set<string>();
+    products.forEach((p) => unique.add((p.category ?? "").trim()));
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [products]);
+
+  const categorySummaries = useMemo(() => {
+    const counts = new Map<string, number>();
+    products.forEach((p) => {
+      const key = (p.category ?? "").trim();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return categories.map((category) => ({
+      category,
+      count: counts.get(category) ?? 0,
+    }));
+  }, [categories, products]);
 
   const updateSalesSummary = (database?: Database) => {
     const db = database ?? getDatabase();
@@ -306,7 +329,7 @@ export default function Sales() {
         );
       });
 
-      addSaleItemsToMonthlyRestock(db, cart);
+      syncMonthlyRestockFromDepot(db);
 
       saveDatabase();
       toast.success(t("sales.toast.completed"));
@@ -320,10 +343,52 @@ export default function Sales() {
     }
   };
 
-  const filteredProducts = products.filter(p =>
-    p.name.toLowerCase().includes(productSearchQuery.toLowerCase()) ||
-    p.barcode.toLowerCase().includes(productSearchQuery.toLowerCase())
-  );
+  const normalizedProductQuery = productSearchQuery.trim().toLowerCase();
+  const filteredCategories = useMemo(() => {
+    return categorySummaries.filter(({ category }) => {
+      if (!normalizedProductQuery) return true;
+      const label = (category || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" })).toLowerCase();
+      return label.includes(normalizedProductQuery);
+    });
+  }, [categorySummaries, normalizedProductQuery, t]);
+
+  const matchedCategoryFromQuery = searchMode === "category" && normalizedProductQuery
+    ? filteredCategories[0]?.category ?? null
+    : null;
+  const activeCategory = searchMode === "category"
+    ? (selectedCategory ?? matchedCategoryFromQuery)
+    : null;
+
+  const filteredProducts = products.filter((p) => {
+    const nameValue = (p.name ?? "").toLowerCase();
+    const barcodeValue = (p.barcode ?? "").toLowerCase();
+    const categoryValue = (p.category ?? "").trim();
+    const categoryValueLower = categoryValue.toLowerCase();
+
+    const nameMatch = nameValue.includes(normalizedProductQuery);
+    const barcodeMatch = barcodeValue.includes(normalizedProductQuery);
+    const categoryMatch = activeCategory
+      ? categoryValueLower === activeCategory.toLowerCase()
+      : normalizedProductQuery
+        ? categoryValueLower.includes(normalizedProductQuery)
+        : true;
+
+    if (searchMode === "category") {
+      if (activeCategory) {
+        return categoryMatch;
+      }
+      if (!normalizedProductQuery) {
+        return true;
+      }
+      return nameMatch || barcodeMatch || categoryMatch;
+    }
+
+    // item search
+    if (!normalizedProductQuery) {
+      return true;
+    }
+    return nameMatch || barcodeMatch;
+  });
 
   const visibleCartItems = cart.filter(item =>
     cartSearchQuery.trim() === ""
@@ -513,9 +578,16 @@ export default function Sales() {
                   rows={3}
                 />
               </div>
-              <Button type="submit" className="w-full">
-                {t("sales.newCustomer.submit")}
-              </Button>
+              <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
+                <DialogClose asChild>
+                  <Button type="button" variant="outline" className="w-full sm:w-auto">
+                    {t("sales.newCustomer.cancel")}
+                  </Button>
+                </DialogClose>
+                <Button type="submit" className="w-full sm:w-auto">
+                  {t("sales.newCustomer.submit")}
+                </Button>
+              </div>
             </form>
           </DialogContent>
         </Dialog>
@@ -531,31 +603,116 @@ export default function Sales() {
             <DialogHeader>
               <DialogTitle>{t("sales.openCatalog")}</DialogTitle>
             </DialogHeader>
-            <Input
-              placeholder={t("sales.searchProducts")}
-              value={productSearchQuery}
-              onChange={(e) => setProductSearchQuery(e.target.value)}
-              className="mb-4"
-            />
-            <div className="space-y-2">
-              {filteredProducts.map(product => (
-                <Card
-                  key={product.id}
-                  className="p-3 cursor-pointer hover:bg-muted transition-colors"
-                  onClick={() => addToCart(product)}
-                >
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <div className="font-medium">{product.name}</div>
-                      <div className="text-sm text-muted-foreground">
-                        {t("depot.form.quantity")}: {product.quantity} • {formatCurrency(product.sell_price)}
-                      </div>
-                    </div>
-                    <Plus className="h-5 w-5 text-primary" />
-                  </div>
-                </Card>
-              ))}
+            <div className="flex gap-2 mb-4">
+              <Input
+                placeholder={t("sales.searchProducts")}
+                value={productSearchQuery}
+                onChange={(e) => setProductSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (searchMode === "category" && !activeCategory && e.key === "Enter" && filteredCategories.length > 0) {
+                    setSelectedCategory(filteredCategories[0].category);
+                    e.preventDefault();
+                  }
+                }}
+                className="flex-1"
+              />
+              <Select value={searchMode} onValueChange={(value) => setSearchMode(value as "item" | "category")}>
+                <SelectTrigger className="w-32">
+                  <SelectValue placeholder={t("sales.searchMode", { defaultValue: "Search mode" })} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="item">{t("sales.searchMode.item", { defaultValue: "Item" })}</SelectItem>
+                  <SelectItem value="category">{t("sales.searchMode.category", { defaultValue: "Category" })}</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
+            {searchMode === "category" && !activeCategory ? (
+              <div className="space-y-2">
+                <p className="text-sm text-muted-foreground">
+                  {t("sales.searchByCategory", { defaultValue: "Browse by category to narrow the list." })}
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {filteredCategories.map(({ category, count }) => (
+                    <Card
+                      key={category || "uncategorized"}
+                      className="p-3 cursor-pointer hover:bg-muted transition-colors"
+                      onClick={() => setSelectedCategory(category)}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="font-medium">
+                          {category || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" })}
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          {t("sales.itemsCount", { defaultValue: "{count} items", values: { count } })}
+                        </span>
+                      </div>
+                    </Card>
+                  ))}
+                </div>
+                {filteredCategories.length === 0 && (
+                  <Card className="p-4 text-sm text-muted-foreground text-center">
+                    {t("sales.noMatches", { defaultValue: "No categories match your search." })}
+                  </Card>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  {searchMode === "category" && activeCategory ? (
+                    <p className="text-sm text-muted-foreground">
+                      {t("sales.filteredCategory", {
+                        defaultValue: "Showing category: {category}",
+                        values: {
+                          category: activeCategory || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" })
+                        }
+                      })}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      {t("sales.filteredByQuery", { defaultValue: "Filtered by search" })}
+                    </p>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedCategory(null);
+                      setProductSearchQuery("");
+                    }}
+                  >
+                    {t("sales.clearFilters", { defaultValue: "Clear" })}
+                  </Button>
+                </div>
+                {filteredProducts.map(product => (
+                  <Card
+                    key={product.id}
+                    className="p-3 cursor-pointer hover:bg-muted transition-colors"
+                    onClick={() => addToCart(product)}
+                  >
+                    <div className="flex justify-between items-center">
+                      <div>
+                        <div className="font-medium">{product.name}</div>
+                        <div className="text-sm text-muted-foreground">
+                          {t("depot.form.category")}: {product.category || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" })}
+                        </div>
+                        <div className="text-sm text-muted-foreground">
+                          {t("depot.form.quantity")}: {product.quantity} | {t("sales.unitPrice", {
+                            defaultValue: "{price} each",
+                            values: { price: formatCurrency(product.sell_price) }
+                          })}
+                        </div>
+                      </div>
+                      <Plus className="h-5 w-5 text-primary" />
+                    </div>
+                  </Card>
+                ))}
+                {filteredProducts.length === 0 && (
+                  <Card className="p-4 text-sm text-muted-foreground text-center">
+                    {t("sales.noMatches", { defaultValue: "No products found for this filter." })}
+                  </Card>
+                )}
+              </div>
+            )}
           </DialogContent>
         </Dialog>
 
@@ -667,3 +824,5 @@ export default function Sales() {
     </Layout>
   );
 }
+
+

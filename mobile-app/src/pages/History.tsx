@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { getDatabase } from "@/lib/db";
 import { endOfDay, endOfMonth, endOfWeek, endOfYear, format, parseISO, startOfDay, startOfMonth, startOfWeek, startOfYear } from "date-fns";
 import { Receipt, Search, Download } from "lucide-react";
-import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
+import { exportSheetsAsExcel } from "@/lib/export-excel";
 import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
@@ -157,6 +157,13 @@ export default function History() {
   const noTransactions = transactions.length === 0;
   const noResults = !noTransactions && filteredTransactions.length === 0;
 
+  const toExcelFilename = (requestedName: string | null | undefined, fallback: string) => {
+    const trimmed = requestedName?.trim();
+    if (!trimmed) return fallback;
+    if (trimmed.toLowerCase().endsWith(".xlsx")) return trimmed;
+    return `${trimmed.replace(/\.json$/i, "").replace(/\.xls$/i, "")}.xlsx`;
+  };
+
   const exportHistoryToExcel = async () => {
     if (filteredTransactions.length === 0) {
       toast.error(t("history.toast.noExport"));
@@ -206,18 +213,16 @@ export default function History() {
       });
     });
 
-    const defaultName = `${t("history.export.filename")}.xls`;
+    const defaultName = `${t("history.export.filename")}.xlsx`;
     const requestedName = window.prompt(
       t("history.export.filenamePrompt", { defaultValue: "Choose file name" }),
       defaultName
     );
-    const finalName = requestedName && requestedName.trim().length > 0
-      ? (requestedName.trim().endsWith(".xls") ? requestedName.trim() : `${requestedName.trim()}.xls`)
-      : defaultName;
+    const finalName = toExcelFilename(requestedName, defaultName);
 
-    await saveExcelUsingShareSheet(finalName, [
+    await exportSheetsAsExcel(finalName, [
       { name: t("history.export.transactionsSheet"), rows }
-    ], { action: "both" });
+    ]);
   };
 
   const computeRange = () => {
@@ -229,7 +234,7 @@ export default function History() {
       return {
         start: startOfDay(day),
         end: endOfDay(day),
-        filename: `${selectedDay}.xls`,
+        filename: `${selectedDay}.xlsx`,
         label: format(day, 'PPP')
       };
     }
@@ -247,7 +252,7 @@ export default function History() {
       }
       const start = startOfWeek(baseDate, { weekStartsOn: 1 });
       const end = endOfWeek(start, { weekStartsOn: 1 });
-      const filename = `${format(start, 'yyyy-MM-dd')}_to_${format(end, 'yyyy-MM-dd')}-summary.xls`;
+      const filename = `${format(start, 'yyyy-MM-dd')}_to_${format(end, 'yyyy-MM-dd')}-summary.xlsx`;
       const label = `${format(start, 'PPP')} - ${format(end, 'PPP')}`;
       return { start, end, filename, label };
     }
@@ -262,7 +267,7 @@ export default function History() {
       return {
         start,
         end,
-        filename: `${format(start, 'yyyy-MM')}-summary.xls`,
+        filename: `${format(start, 'yyyy-MM')}-summary.xlsx`,
         label: format(start, 'LLLL yyyy')
       };
     }
@@ -276,7 +281,7 @@ export default function History() {
     return {
       start,
       end,
-      filename: `${format(start, 'yyyy')}-summary.xls`,
+      filename: `${format(start, 'yyyy')}-summary.xlsx`,
       label: format(start, 'yyyy')
     };
   };
@@ -293,9 +298,7 @@ export default function History() {
       t("history.export.filenamePrompt", { defaultValue: "Choose file name" }),
       filename
     );
-    const finalFilename = requestedName && requestedName.trim().length > 0
-      ? (requestedName.trim().endsWith(".xls") ? requestedName.trim() : `${requestedName.trim()}.xls`)
-      : filename;
+    const finalFilename = toExcelFilename(requestedName, filename);
 
     const summaryTransactions = transactions.filter(transaction => {
       const transactionDate = new Date(transaction.date);
@@ -439,11 +442,11 @@ export default function History() {
         ]);
       });
 
-    await saveExcelUsingShareSheet(finalFilename, [
+    await exportSheetsAsExcel(finalFilename, [
       { name: t("history.export.summarySheet"), rows: overviewRows },
       { name: t("history.export.transactionsSheet"), rows: detailRows },
       { name: t("history.export.logSheet", { defaultValue: "Log" }), rows: logRows }
-    ], { action: "both" });
+    ]);
 
     toast.success(t("history.toast.summaryExported"));
     setIsSummaryDialogOpen(false);
@@ -462,12 +465,12 @@ export default function History() {
               className="pl-9"
             />
           </div>
-          <div className="flex w-full sm:w-auto gap-2">
-            <Button variant="outline" onClick={exportHistoryToExcel} className="flex-1 sm:flex-none">
+          <div className="flex flex-col sm:flex-row w-full sm:w-auto gap-2">
+            <Button variant="outline" onClick={exportHistoryToExcel} className="w-full sm:w-auto">
               <Download className="h-4 w-4 mr-2" />
               {t("history.export.all")}
             </Button>
-            <Button onClick={() => setIsSummaryDialogOpen(true)} className="flex-1 sm:flex-none">
+            <Button onClick={() => setIsSummaryDialogOpen(true)} className="w-full sm:w-auto">
               <Download className="h-4 w-4 mr-2" />
               {t("history.export.summary")}
             </Button>
@@ -616,7 +619,8 @@ export default function History() {
                 <div>
                   <div className="text-sm text-muted-foreground mb-2">{t("history.detail.itemsTitle")}</div>
                   {transaction.items.length > 0 ? (
-                    <Table>
+                    <div className="overflow-x-auto">
+                      <Table className="min-w-[420px]">
                       <TableHeader>
                         <TableRow>
                           <TableHead>{t("customers.export.columns.item")}</TableHead>
@@ -641,7 +645,8 @@ export default function History() {
                           <TableCell className="text-right font-semibold">{formatCurrency(transaction.items.reduce((sum, item) => sum + item.line_total, 0))}</TableCell>
                         </TableRow>
                       </TableFooter>
-                    </Table>
+                      </Table>
+                    </div>
                   ) : (
                     <p className="text-sm text-muted-foreground">{t("history.detail.noItems")}</p>
                   )}

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { getDatabase, saveDatabase } from "@/lib/db";
 import { Product } from "@/types";
@@ -30,7 +30,8 @@ import {
   CommandList
 } from "@/components/ui/command";
 import { formatCurrency } from "@/lib/utils";
-import { saveExcelUsingShareSheet } from "@/lib/saveExcelUsingShareSheet";
+import { exportSheetsAsExcel } from "@/lib/export-excel";
+import { syncMonthlyRestockFromDepot } from "@/lib/shopping";
 
 export default function Depot() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -47,6 +48,7 @@ export default function Depot() {
   });
   const [inventoryTotals, setInventoryTotals] = useState({ buy: 0, sell: 0 });
   const [monthlySalesTotal, setMonthlySalesTotal] = useState(0);
+  const [monthlyProfitTotal, setMonthlyProfitTotal] = useState(0);
   const { t } = useTranslation();
 
   const encodeCategory = (value: string) => (value === "" ? "__uncategorized__" : value);
@@ -105,6 +107,40 @@ export default function Depot() {
     setMonthlySalesTotal(Number(value ?? 0));
   }, [selectedMonth]);
 
+  const recalculateMonthlyProfit = useCallback((monthValue?: string) => {
+    const db = getDatabase();
+    const monthFilter = monthValue ?? selectedMonth;
+    if (!monthFilter) {
+      const totalResult = db.exec(`
+        SELECT
+          COALESCE(SUM(ti.quantity * ti.unit_price), 0) as revenue,
+          COALESCE(SUM(ti.quantity * COALESCE(p.buy_price, 0)), 0) as cost
+        FROM transaction_items ti
+        JOIN transactions t ON t.id = ti.transaction_id
+        LEFT JOIN products p ON p.id = ti.product_id
+      `);
+      const revenue = totalResult[0]?.values?.[0]?.[0] as number | undefined;
+      const cost = totalResult[0]?.values?.[0]?.[1] as number | undefined;
+      setMonthlyProfitTotal(Number(revenue ?? 0) - Number(cost ?? 0));
+      return;
+    }
+    const result = db.exec(
+      `
+      SELECT
+        COALESCE(SUM(ti.quantity * ti.unit_price), 0) as revenue,
+        COALESCE(SUM(ti.quantity * COALESCE(p.buy_price, 0)), 0) as cost
+      FROM transaction_items ti
+      JOIN transactions t ON t.id = ti.transaction_id
+      LEFT JOIN products p ON p.id = ti.product_id
+      WHERE strftime('%Y-%m', t.date) = ?
+      `,
+      [monthFilter]
+    );
+    const revenue = result[0]?.values?.[0]?.[0] as number | undefined;
+    const cost = result[0]?.values?.[0]?.[1] as number | undefined;
+    setMonthlyProfitTotal(Number(revenue ?? 0) - Number(cost ?? 0));
+  }, [selectedMonth]);
+
   const loadProducts = useCallback(() => {
     const db = getDatabase();
     const result = db.exec('SELECT * FROM products ORDER BY name');
@@ -124,6 +160,7 @@ export default function Depot() {
       applyFilters(prods);
       recalculateTotals(prods);
       recalculateMonthlySales(selectedMonth);
+      recalculateMonthlyProfit(selectedMonth);
       return;
     }
 
@@ -131,7 +168,8 @@ export default function Depot() {
     setFilteredProducts([]);
     recalculateTotals([]);
     recalculateMonthlySales(selectedMonth);
-  }, [applyFilters, recalculateMonthlySales, recalculateTotals, selectedMonth]);
+    recalculateMonthlyProfit(selectedMonth);
+  }, [applyFilters, recalculateMonthlyProfit, recalculateMonthlySales, recalculateTotals, selectedMonth]);
 
   useEffect(() => {
     if (selectedCategory !== "all" && !categories.includes(selectedCategory)) {
@@ -149,7 +187,8 @@ useEffect(() => {
 
 useEffect(() => {
   recalculateMonthlySales(selectedMonth);
-}, [recalculateMonthlySales, selectedMonth]);
+  recalculateMonthlyProfit(selectedMonth);
+}, [recalculateMonthlyProfit, recalculateMonthlySales, selectedMonth]);
 
   const handleSaveProduct = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -187,7 +226,8 @@ useEffect(() => {
         );
         toast.success(t("depot.toast.added"));
       }
-      
+
+      syncMonthlyRestockFromDepot(db);
       saveDatabase();
       loadProducts();
       setIsDialogOpen(false);
@@ -201,6 +241,7 @@ useEffect(() => {
   const adjustQuantity = (productId: number, change: number) => {
     const db = getDatabase();
     db.run(`UPDATE products SET quantity = quantity + ? WHERE id = ?`, [change, productId]);
+    syncMonthlyRestockFromDepot(db);
     saveDatabase();
     loadProducts();
     toast.success(change > 0 ? t("depot.toast.increased") : t("depot.toast.decreased"));
@@ -217,6 +258,7 @@ useEffect(() => {
     const db = getDatabase();
     db.run("UPDATE shopping_list_items SET product_id = NULL WHERE product_id = ?", [product.id]);
     db.run("DELETE FROM products WHERE id = ?", [product.id]);
+    syncMonthlyRestockFromDepot(db);
     saveDatabase();
     toast.success(t("depot.toast.deleted"));
     loadProducts();
@@ -236,6 +278,7 @@ useEffect(() => {
     const db = getDatabase();
     db.run("UPDATE shopping_list_items SET product_id = NULL WHERE product_id IS NOT NULL");
     db.run("DELETE FROM products");
+    syncMonthlyRestockFromDepot(db);
     saveDatabase();
     toast.success(t("depot.toast.allDeleted"));
     setSelectedCategory("all");
@@ -270,9 +313,9 @@ useEffect(() => {
     ]);
   });
 
-    saveExcelUsingShareSheet(`${t("depot.export.filename")}.xls`, [
+    exportSheetsAsExcel(`${t("depot.export.filename")}.xlsx`, [
       { name: t("depot.export.sheetName"), rows }
-    ], { action: "both" }).catch(() => toast.error(t("depot.toast.noExport")));
+    ]).catch(() => toast.error(t("depot.toast.noExport")));
   };
 
   return (
@@ -313,6 +356,12 @@ useEffect(() => {
               <div className="text-sm">
                 {t("depot.totals.monthlySales", { defaultValue: "Sales total" })}:{" "}
                 <span className="font-semibold">{formatCurrency(monthlySalesTotal)}</span>
+              </div>
+              <div className="text-sm">
+                {t("depot.totals.monthlyProfit", { defaultValue: "Profit" })}:{" "}
+                <span className={`font-semibold ${monthlyProfitTotal >= 0 ? "" : "text-destructive"}`}>
+                  {formatCurrency(monthlyProfitTotal)}
+                </span>
               </div>
             </div>
           </div>
@@ -373,20 +422,29 @@ useEffect(() => {
                       <Input id="min_stock" name="min_stock" type="number" defaultValue={editingProduct?.min_stock || 5} required />
                     </div>
                   </div>
-                  <Button type="submit" className="w-full">{t("depot.form.save")}</Button>
+                  <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
+                    <DialogClose asChild>
+                      <Button type="button" variant="outline" className="w-full sm:w-auto">
+                        {t("common.cancel")}
+                      </Button>
+                    </DialogClose>
+                    <Button type="submit" className="w-full sm:w-auto">
+                      {t("depot.form.save")}
+                    </Button>
+                  </div>
                 </form>
               </DialogContent>
             </Dialog>
           </div>
-          <div className="flex gap-2 w-full sm:w-auto">
-            <Button variant="outline" onClick={exportProductsToExcel} className="flex-1 sm:flex-none">
+          <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+            <Button variant="outline" onClick={exportProductsToExcel} className="w-full sm:w-auto">
               <Download className="h-4 w-4 mr-2" />
               {t("depot.export")}
             </Button>
             <Button
               variant="destructive"
               onClick={handleDeleteAllProducts}
-              className="flex-1 sm:flex-none"
+              className="w-full sm:w-auto"
               disabled={products.length === 0}
             >
               <Trash2 className="h-4 w-4 mr-2" />

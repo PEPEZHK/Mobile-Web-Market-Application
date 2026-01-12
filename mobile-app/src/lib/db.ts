@@ -130,6 +130,23 @@ function createTables(database: Database) {
       FOREIGN KEY (list_id) REFERENCES shopping_lists(id),
       FOREIGN KEY (product_id) REFERENCES products(id)
     );
+
+    CREATE TABLE IF NOT EXISTS shopping_list_transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      list_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reverted_at DATETIME,
+      FOREIGN KEY (list_id) REFERENCES shopping_lists(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS shopping_list_transfer_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transfer_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      quantity REAL NOT NULL,
+      FOREIGN KEY (transfer_id) REFERENCES shopping_list_transfers(id),
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    );
   `);
 }
 
@@ -332,6 +349,27 @@ function migrateDatabase(database: Database) {
   }
 
   database.run(`
+    CREATE TABLE IF NOT EXISTS shopping_list_transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      list_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      reverted_at DATETIME,
+      FOREIGN KEY (list_id) REFERENCES shopping_lists(id)
+    )
+  `);
+
+  database.run(`
+    CREATE TABLE IF NOT EXISTS shopping_list_transfer_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transfer_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      quantity REAL NOT NULL,
+      FOREIGN KEY (transfer_id) REFERENCES shopping_list_transfers(id),
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    )
+  `);
+
+  database.run(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       nickname TEXT NOT NULL UNIQUE,
@@ -448,6 +486,8 @@ export function exportDatabaseAsJSON(): string {
   const shoppingLists = database.exec('SELECT * FROM shopping_lists');
   const shoppingListItems = database.exec('SELECT * FROM shopping_list_items');
   const paymentLogs = database.exec('SELECT * FROM payment_logs');
+  const shoppingListTransfers = database.exec('SELECT * FROM shopping_list_transfers');
+  const shoppingListTransferItems = database.exec('SELECT * FROM shopping_list_transfer_items');
 
   return JSON.stringify({
     products: products[0]?.values || [],
@@ -456,7 +496,9 @@ export function exportDatabaseAsJSON(): string {
     transaction_items: transactionItems[0]?.values || [],
     shopping_lists: shoppingLists[0]?.values || [],
     shopping_list_items: shoppingListItems[0]?.values || [],
-    payment_logs: paymentLogs[0]?.values || []
+    payment_logs: paymentLogs[0]?.values || [],
+    shopping_list_transfers: shoppingListTransfers[0]?.values || [],
+    shopping_list_transfer_items: shoppingListTransferItems[0]?.values || []
   }, null, 2);
 }
 
@@ -466,6 +508,8 @@ export function importDatabaseFromJSON(jsonData: string) {
     const database = getDatabase();
 
     database.run('DELETE FROM shopping_list_items');
+    database.run('DELETE FROM shopping_list_transfer_items');
+    database.run('DELETE FROM shopping_list_transfers');
     database.run('DELETE FROM shopping_lists');
     database.run('DELETE FROM transaction_items');
     database.run('DELETE FROM transactions');
@@ -594,6 +638,50 @@ export function importDatabaseFromJSON(jsonData: string) {
           `INSERT INTO shopping_list_items (id, list_id, product_id, name, quantity_value, quantity_label, estimated_unit_cost, notes, is_completed, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [id, list_id, product_id, name, quantity_value, quantity_label, estimated_unit_cost, notes, is_completed, created_at]
+        );
+      });
+    }
+
+    if (data.shopping_list_transfers) {
+      data.shopping_list_transfers.forEach((row: SqlRow) => {
+        const [
+          id,
+          list_id,
+          created_at,
+          reverted_at
+        ] = [
+          row[0],
+          row[1],
+          row[2] ?? new Date().toISOString(),
+          row[3] ?? null
+        ];
+
+        database.run(
+          `INSERT INTO shopping_list_transfers (id, list_id, created_at, reverted_at)
+           VALUES (?, ?, ?, ?)` ,
+          [id, list_id, created_at, reverted_at]
+        );
+      });
+    }
+
+    if (data.shopping_list_transfer_items) {
+      data.shopping_list_transfer_items.forEach((row: SqlRow) => {
+        const [
+          id,
+          transfer_id,
+          product_id,
+          quantity
+        ] = [
+          row[0],
+          row[1],
+          row[2],
+          row[3] ?? 0
+        ];
+
+        database.run(
+          `INSERT INTO shopping_list_transfer_items (id, transfer_id, product_id, quantity)
+           VALUES (?, ?, ?, ?)` ,
+          [id, transfer_id, product_id, quantity]
         );
       });
     }
