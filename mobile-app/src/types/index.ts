@@ -1,3 +1,5 @@
+export type ProductUnit = "pcs" | "metr";
+
 export interface Product {
   id: number;
   name: string;
@@ -7,6 +9,7 @@ export interface Product {
   sell_price: number;
   quantity: number;
   min_stock: number;
+  unit: ProductUnit;
   created_at: string;
 }
 
@@ -32,6 +35,7 @@ export interface TransactionItem {
   transaction_id: number;
   product_id: number;
   quantity: number;
+  unit: ProductUnit;
   unit_price: number;
   line_total: number;
 }

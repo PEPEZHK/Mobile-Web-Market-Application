@@ -6,8 +6,9 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { getDatabase, saveDatabase } from "@/lib/db";
-import { Product } from "@/types";
+import { getDatabase, listProducts, saveDatabase } from "@/lib/db";
+import { formatQuantityWithUnit, getQuantityInputStep, getQuantityStep, getUnitLabel, resolveProductUnit } from "@/lib/units";
+import { Product, ProductUnit } from "@/types";
 import {
   Plus,
   Search,
@@ -16,7 +17,7 @@ import {
   Minus,
   Download,
   Trash2,
-  ChevronsUpDown
+  ChevronsUpDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "@/hooks/useTranslation";
@@ -27,11 +28,33 @@ import {
   CommandGroup,
   CommandInput,
   CommandItem,
-  CommandList
+  CommandList,
 } from "@/components/ui/command";
 import { formatCurrency } from "@/lib/utils";
 import { exportSheetsAsExcel } from "@/lib/export-excel";
 import { syncMonthlyRestockFromDepot } from "@/lib/shopping";
+
+interface ProductFormState {
+  name: string;
+  barcode: string;
+  category: string;
+  buy_price: string;
+  sell_price: string;
+  quantity: string;
+  min_stock: string;
+  unit: ProductUnit;
+}
+
+const defaultProductForm: ProductFormState = {
+  name: "",
+  barcode: "",
+  category: "",
+  buy_price: "0",
+  sell_price: "0",
+  quantity: "0",
+  min_stock: "5",
+  unit: "pcs",
+};
 
 export default function Depot() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -39,6 +62,7 @@ export default function Depot() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [productForm, setProductForm] = useState<ProductFormState>(defaultProductForm);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isCategoryPickerOpen, setIsCategoryPickerOpen] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(() => {
@@ -55,7 +79,7 @@ export default function Depot() {
   const decodeCategory = (value: string) => (value === "__uncategorized__" ? "" : value);
 
   const categories = useMemo(() => {
-    const unique = new Set(products.map(p => (p.category?.trim() ?? "")));
+    const unique = new Set(products.map((product) => product.category?.trim() ?? ""));
     return ["all", ...Array.from(unique)];
   }, [products]);
 
@@ -65,14 +89,14 @@ export default function Depot() {
 
     if (searchQuery) {
       const normalizedQuery = searchQuery.toLowerCase();
-      filtered = filtered.filter(p =>
-        p.name.toLowerCase().includes(normalizedQuery) ||
-        p.barcode.toLowerCase().includes(normalizedQuery)
+      filtered = filtered.filter((product) =>
+        product.name.toLowerCase().includes(normalizedQuery) ||
+        product.barcode.toLowerCase().includes(normalizedQuery),
       );
     }
 
     if (selectedCategory !== "all") {
-      filtered = filtered.filter(p => (p.category?.trim() ?? "") === selectedCategory);
+      filtered = filtered.filter((product) => (product.category?.trim() ?? "") === selectedCategory);
     }
 
     setFilteredProducts(filtered);
@@ -81,11 +105,11 @@ export default function Depot() {
   const recalculateTotals = useCallback((source?: Product[]) => {
     const base = source ?? products;
     const totals = base.reduce(
-      (acc, product) => ({
-        buy: acc.buy + (product.buy_price * product.quantity),
-        sell: acc.sell + (product.sell_price * product.quantity)
+      (accumulator, product) => ({
+        buy: accumulator.buy + (product.buy_price * product.quantity),
+        sell: accumulator.sell + (product.sell_price * product.quantity),
       }),
-      { buy: 0, sell: 0 }
+      { buy: 0, sell: 0 },
     );
     setInventoryTotals(totals);
   }, [products]);
@@ -94,14 +118,15 @@ export default function Depot() {
     const db = getDatabase();
     const monthFilter = monthValue ?? selectedMonth;
     if (!monthFilter) {
-      const totalResult = db.exec(`SELECT COALESCE(SUM(total_amount), 0) FROM transactions`);
+      const totalResult = db.exec("SELECT COALESCE(SUM(total_amount), 0) FROM transactions");
       const total = totalResult[0]?.values?.[0]?.[0] as number | undefined;
       setMonthlySalesTotal(Number(total ?? 0));
       return;
     }
+
     const result = db.exec(
-      `SELECT COALESCE(SUM(total_amount), 0) FROM transactions WHERE strftime('%Y-%m', date) = ?`,
-      [monthFilter]
+      "SELECT COALESCE(SUM(total_amount), 0) FROM transactions WHERE strftime('%Y-%m', date) = ?",
+      [monthFilter],
     );
     const value = result[0]?.values?.[0]?.[0] as number | undefined;
     setMonthlySalesTotal(Number(value ?? 0));
@@ -124,17 +149,18 @@ export default function Depot() {
       setMonthlyProfitTotal(Number(revenue ?? 0) - Number(cost ?? 0));
       return;
     }
+
     const result = db.exec(
       `
-      SELECT
-        COALESCE(SUM(ti.quantity * ti.unit_price), 0) as revenue,
-        COALESCE(SUM(ti.quantity * COALESCE(p.buy_price, 0)), 0) as cost
-      FROM transaction_items ti
-      JOIN transactions t ON t.id = ti.transaction_id
-      LEFT JOIN products p ON p.id = ti.product_id
-      WHERE strftime('%Y-%m', t.date) = ?
+        SELECT
+          COALESCE(SUM(ti.quantity * ti.unit_price), 0) as revenue,
+          COALESCE(SUM(ti.quantity * COALESCE(p.buy_price, 0)), 0) as cost
+        FROM transaction_items ti
+        JOIN transactions t ON t.id = ti.transaction_id
+        LEFT JOIN products p ON p.id = ti.product_id
+        WHERE strftime('%Y-%m', t.date) = ?
       `,
-      [monthFilter]
+      [monthFilter],
     );
     const revenue = result[0]?.values?.[0]?.[0] as number | undefined;
     const cost = result[0]?.values?.[0]?.[1] as number | undefined;
@@ -142,31 +168,10 @@ export default function Depot() {
   }, [selectedMonth]);
 
   const loadProducts = useCallback(() => {
-    const db = getDatabase();
-    const result = db.exec('SELECT * FROM products ORDER BY name');
-    if (result[0]) {
-      const prods = result[0].values.map((row) => ({
-        id: row[0] as number,
-        name: row[1] as string,
-        barcode: row[2] as string,
-        category: row[3] as string,
-        buy_price: row[4] as number,
-        sell_price: row[5] as number,
-        quantity: row[6] as number,
-        min_stock: row[7] as number,
-        created_at: row[8] as string,
-      }));
-      setProducts(prods);
-      applyFilters(prods);
-      recalculateTotals(prods);
-      recalculateMonthlySales(selectedMonth);
-      recalculateMonthlyProfit(selectedMonth);
-      return;
-    }
-
-    setProducts([]);
-    setFilteredProducts([]);
-    recalculateTotals([]);
+    const loadedProducts = listProducts();
+    setProducts(loadedProducts);
+    applyFilters(loadedProducts);
+    recalculateTotals(loadedProducts);
     recalculateMonthlySales(selectedMonth);
     recalculateMonthlyProfit(selectedMonth);
   }, [applyFilters, recalculateMonthlyProfit, recalculateMonthlySales, recalculateTotals, selectedMonth]);
@@ -177,52 +182,101 @@ export default function Depot() {
     }
   }, [categories, selectedCategory]);
 
-useEffect(() => {
-  loadProducts();
-}, [loadProducts]);
+  useEffect(() => {
+    loadProducts();
+  }, [loadProducts]);
 
-useEffect(() => {
-  applyFilters();
-}, [applyFilters]);
+  useEffect(() => {
+    applyFilters();
+  }, [applyFilters]);
 
-useEffect(() => {
-  recalculateMonthlySales(selectedMonth);
-  recalculateMonthlyProfit(selectedMonth);
-}, [recalculateMonthlyProfit, recalculateMonthlySales, selectedMonth]);
+  useEffect(() => {
+    recalculateMonthlySales(selectedMonth);
+    recalculateMonthlyProfit(selectedMonth);
+  }, [recalculateMonthlyProfit, recalculateMonthlySales, selectedMonth]);
 
-  const handleSaveProduct = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const formData = new FormData(e.currentTarget);
+  const resetProductForm = () => {
+    setProductForm(defaultProductForm);
+    setEditingProduct(null);
+  };
+
+  const openAddDialog = () => {
+    resetProductForm();
+    setIsDialogOpen(true);
+  };
+
+  const openEditDialog = (product: Product) => {
+    setEditingProduct(product);
+    setProductForm({
+      name: product.name,
+      barcode: product.barcode,
+      category: product.category,
+      buy_price: product.buy_price.toString(),
+      sell_price: product.sell_price.toString(),
+      quantity: product.quantity.toString(),
+      min_stock: product.min_stock.toString(),
+      unit: product.unit,
+    });
+    setIsDialogOpen(true);
+  };
+
+  const handleProductFormChange = (field: keyof Omit<ProductFormState, "unit">, value: string) => {
+    setProductForm((prev) => {
+      const next = {
+        ...prev,
+        [field]: value,
+      };
+
+      if (field === "category") {
+        next.unit = resolveProductUnit(value);
+      }
+
+      return next;
+    });
+  };
+
+  const handleSaveProduct = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     const db = getDatabase();
+    const resolvedUnit = resolveProductUnit(productForm.category);
 
     try {
       if (editingProduct) {
         db.run(
-          `UPDATE products SET name=?, barcode=?, category=?, buy_price=?, sell_price=?, quantity=?, min_stock=? WHERE id=?`,
+          `
+            UPDATE products
+            SET name=?, barcode=?, category=?, buy_price=?, sell_price=?, quantity=?, min_stock=?, unit=?
+            WHERE id=?
+          `,
           [
-            formData.get('name'),
-            formData.get('barcode'),
-            formData.get('category'),
-            parseFloat(formData.get('buy_price') as string),
-            parseFloat(formData.get('sell_price') as string),
-            parseInt(formData.get('quantity') as string),
-            parseInt(formData.get('min_stock') as string),
-            editingProduct.id
-          ]
+            productForm.name.trim(),
+            productForm.barcode.trim() || null,
+            productForm.category.trim() || null,
+            Number.parseFloat(productForm.buy_price) || 0,
+            Number.parseFloat(productForm.sell_price) || 0,
+            Number.parseFloat(productForm.quantity) || 0,
+            Number.parseFloat(productForm.min_stock) || 0,
+            resolvedUnit,
+            editingProduct.id,
+          ],
         );
         toast.success(t("depot.toast.updated"));
       } else {
         db.run(
-          `INSERT INTO products (name, barcode, category, buy_price, sell_price, quantity, min_stock) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `
+            INSERT INTO products (name, barcode, category, buy_price, sell_price, quantity, min_stock, unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `,
           [
-            formData.get('name'),
-            formData.get('barcode'),
-            formData.get('category'),
-            parseFloat(formData.get('buy_price') as string),
-            parseFloat(formData.get('sell_price') as string),
-            parseInt(formData.get('quantity') as string),
-            parseInt(formData.get('min_stock') as string)
-          ]
+            productForm.name.trim(),
+            productForm.barcode.trim() || null,
+            productForm.category.trim() || null,
+            Number.parseFloat(productForm.buy_price) || 0,
+            Number.parseFloat(productForm.sell_price) || 0,
+            Number.parseFloat(productForm.quantity) || 0,
+            Number.parseFloat(productForm.min_stock) || 0,
+            resolvedUnit,
+          ],
         );
         toast.success(t("depot.toast.added"));
       }
@@ -231,16 +285,22 @@ useEffect(() => {
       saveDatabase();
       loadProducts();
       setIsDialogOpen(false);
-      setEditingProduct(null);
+      resetProductForm();
     } catch (error) {
       toast.error(t("depot.toast.savedError"));
       console.error(error);
     }
   };
 
-  const adjustQuantity = (productId: number, change: number) => {
+  const adjustQuantity = (product: Product, change: number) => {
+    const nextQuantity = product.quantity + change;
+    if (nextQuantity < 0) {
+      toast.error(t("depot.toast.noNegativeStock"));
+      return;
+    }
+
     const db = getDatabase();
-    db.run(`UPDATE products SET quantity = quantity + ? WHERE id = ?`, [change, productId]);
+    db.run("UPDATE products SET quantity = quantity + ? WHERE id = ?", [change, product.id]);
     syncMonthlyRestockFromDepot(db);
     saveDatabase();
     loadProducts();
@@ -249,7 +309,7 @@ useEffect(() => {
 
   const handleDeleteProduct = (product: Product) => {
     const confirmed = window.confirm(
-      t("depot.confirm.delete", { values: { name: product.name } })
+      t("depot.confirm.delete", { values: { name: product.name } }),
     );
     if (!confirmed) {
       return;
@@ -295,26 +355,28 @@ useEffect(() => {
       t("depot.export.name"),
       t("depot.export.barcode"),
       t("depot.export.category"),
+      t("common.unit"),
       t("depot.export.buyPrice"),
       t("depot.export.sellPrice"),
       t("depot.export.quantity"),
       t("depot.export.minStock"),
     ]];
 
-    filteredProducts.forEach(product => {
+    filteredProducts.forEach((product) => {
       rows.push([
         product.name,
         product.barcode || "-",
         product.category || "-",
+        getUnitLabel(product.unit, t, "short"),
         product.buy_price,
-      product.sell_price,
-      product.quantity,
-      product.min_stock
-    ]);
-  });
+        product.sell_price,
+        product.quantity,
+        product.min_stock,
+      ]);
+    });
 
     exportSheetsAsExcel(`${t("depot.export.filename")}.xlsx`, [
-      { name: t("depot.export.sheetName"), rows }
+      { name: t("depot.export.sheetName"), rows },
     ]).catch(() => toast.error(t("depot.toast.noExport")));
   };
 
@@ -342,7 +404,7 @@ useEffect(() => {
               <Input
                 type="month"
                 value={selectedMonth}
-                onChange={(e) => setSelectedMonth(e.target.value)}
+                onChange={(event) => setSelectedMonth(event.target.value)}
               />
               <Button
                 variant="ghost"
@@ -374,13 +436,21 @@ useEffect(() => {
               <Input
                 placeholder={t("depot.search.placeholder")}
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(event) => setSearchQuery(event.target.value)}
                 className="pl-9"
               />
             </div>
-            <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+            <Dialog
+              open={isDialogOpen}
+              onOpenChange={(open) => {
+                setIsDialogOpen(open);
+                if (!open) {
+                  resetProductForm();
+                }
+              }}
+            >
               <DialogTrigger asChild>
-                <Button onClick={() => setEditingProduct(null)}>
+                <Button onClick={openAddDialog}>
                   <Plus className="h-4 w-4 mr-2" />
                   {t("depot.add")}
                 </Button>
@@ -392,34 +462,79 @@ useEffect(() => {
                 <form onSubmit={handleSaveProduct} className="space-y-4">
                   <div>
                     <Label htmlFor="name">{t("depot.form.name")}</Label>
-                    <Input id="name" name="name" defaultValue={editingProduct?.name} required />
+                    <Input
+                      id="name"
+                      value={productForm.name}
+                      onChange={(event) => handleProductFormChange("name", event.target.value)}
+                      required
+                    />
                   </div>
                   <div>
                     <Label htmlFor="barcode">{t("depot.form.barcode")}</Label>
-                    <Input id="barcode" name="barcode" defaultValue={editingProduct?.barcode} />
+                    <Input
+                      id="barcode"
+                      value={productForm.barcode}
+                      onChange={(event) => handleProductFormChange("barcode", event.target.value)}
+                    />
                   </div>
                   <div>
                     <Label htmlFor="category">{t("depot.form.category")}</Label>
-                    <Input id="category" name="category" defaultValue={editingProduct?.category} />
+                    <Input
+                      id="category"
+                      value={productForm.category}
+                      onChange={(event) => handleProductFormChange("category", event.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="unit">{t("depot.form.unit")}</Label>
+                    <Input id="unit" value={getUnitLabel(productForm.unit, t)} readOnly />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label htmlFor="buy_price">{t("depot.form.buyPrice")}</Label>
-                      <Input id="buy_price" name="buy_price" type="number" step="0.01" defaultValue={editingProduct?.buy_price} required />
+                      <Input
+                        id="buy_price"
+                        type="number"
+                        step="0.01"
+                        value={productForm.buy_price}
+                        onChange={(event) => handleProductFormChange("buy_price", event.target.value)}
+                        required
+                      />
                     </div>
                     <div>
                       <Label htmlFor="sell_price">{t("depot.form.sellPrice")}</Label>
-                      <Input id="sell_price" name="sell_price" type="number" step="0.01" defaultValue={editingProduct?.sell_price} required />
+                      <Input
+                        id="sell_price"
+                        type="number"
+                        step="0.01"
+                        value={productForm.sell_price}
+                        onChange={(event) => handleProductFormChange("sell_price", event.target.value)}
+                        required
+                      />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label htmlFor="quantity">{t("depot.form.quantity")}</Label>
-                      <Input id="quantity" name="quantity" type="number" defaultValue={editingProduct?.quantity || 0} required />
+                      <Input
+                        id="quantity"
+                        type="number"
+                        step={getQuantityInputStep(productForm.unit)}
+                        value={productForm.quantity}
+                        onChange={(event) => handleProductFormChange("quantity", event.target.value)}
+                        required
+                      />
                     </div>
                     <div>
                       <Label htmlFor="min_stock">{t("depot.form.minStock")}</Label>
-                      <Input id="min_stock" name="min_stock" type="number" defaultValue={editingProduct?.min_stock || 5} required />
+                      <Input
+                        id="min_stock"
+                        type="number"
+                        step={getQuantityInputStep(productForm.unit)}
+                        value={productForm.min_stock}
+                        onChange={(event) => handleProductFormChange("min_stock", event.target.value)}
+                        required
+                      />
                     </div>
                   </div>
                   <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
@@ -464,7 +579,9 @@ useEffect(() => {
               >
                 {selectedCategory === "all"
                   ? t("depot.filter.all")
-                  : (selectedCategory ? selectedCategory : t("depot.filter.uncategorized"))}
+                  : selectedCategory
+                    ? selectedCategory
+                    : t("depot.filter.uncategorized")}
                 <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
             </PopoverTrigger>
@@ -474,7 +591,7 @@ useEffect(() => {
                 <CommandList>
                   <CommandEmpty>{t("depot.filter.noResults")}</CommandEmpty>
                   <CommandGroup>
-                    {categories.map(categoryValue => {
+                    {categories.map((categoryValue) => {
                       const encoded = categoryValue === "all" ? "all" : encodeCategory(categoryValue);
                       const label =
                         categoryValue === "all"
@@ -482,11 +599,12 @@ useEffect(() => {
                           : categoryValue
                             ? categoryValue
                             : t("depot.filter.uncategorized");
+
                       return (
                         <CommandItem
                           key={encoded}
                           value={encoded}
-                          onSelect={value => {
+                          onSelect={(value) => {
                             if (value === "all") {
                               setSelectedCategory("all");
                             } else {
@@ -507,7 +625,7 @@ useEffect(() => {
         </div>
 
         <div className="space-y-3">
-          {filteredProducts.map(product => (
+          {filteredProducts.map((product) => (
             <Card key={product.id} className="p-4">
               <div className="flex justify-between items-start mb-2">
                 <div className="flex-1">
@@ -521,17 +639,13 @@ useEffect(() => {
                     )}
                   </div>
                   <p className="text-sm text-muted-foreground">{product.barcode}</p>
-                  <Badge variant="secondary" className="mt-1">{product.category}</Badge>
+                  <div className="flex gap-2 mt-1">
+                    <Badge variant="secondary">{product.category}</Badge>
+                    <Badge variant="outline">{getUnitLabel(product.unit, t, "short")}</Badge>
+                  </div>
                 </div>
                 <div className="flex items-center gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => {
-                      setEditingProduct(product);
-                      setIsDialogOpen(true);
-                    }}
-                  >
+                  <Button variant="ghost" size="icon" onClick={() => openEditDialog(product)}>
                     <Pencil className="h-4 w-4" />
                   </Button>
                   <Button
@@ -560,19 +674,21 @@ useEffect(() => {
                 <Button
                   variant="outline"
                   size="icon"
-                  onClick={() => adjustQuantity(product.id, -1)}
+                  onClick={() => adjustQuantity(product, -getQuantityStep(product.unit))}
                   disabled={product.quantity <= 0}
                 >
                   <Minus className="h-4 w-4" />
                 </Button>
                 <div className="flex-1 text-center">
-                  <div className="text-2xl font-bold text-foreground">{product.quantity}</div>
+                  <div className="text-2xl font-bold text-foreground">
+                    {formatQuantityWithUnit(product.quantity, product.unit, t)}
+                  </div>
                   <div className="text-xs text-muted-foreground">{t("depot.stock")}</div>
                 </div>
                 <Button
                   variant="outline"
                   size="icon"
-                  onClick={() => adjustQuantity(product.id, 1)}
+                  onClick={() => adjustQuantity(product, getQuantityStep(product.unit))}
                 >
                   <Plus className="h-4 w-4" />
                 </Button>

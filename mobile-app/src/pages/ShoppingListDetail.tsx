@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
 import { exportSheetsAsExcel } from "@/lib/export-excel";
-import { getDatabase, saveDatabase } from "@/lib/db";
+import { getDatabase, listProducts, saveDatabase } from "@/lib/db";
 import {
   ensureMonthlyRestockList,
   MONTHLY_RESTOCK_TYPE,
@@ -385,27 +385,7 @@ export default function ShoppingListDetailPage() {
   };
 
   const loadProducts = () => {
-    const db = getDatabase();
-    const result = db.exec(`
-      SELECT id, name, barcode, category, buy_price, sell_price, quantity, min_stock, created_at
-      FROM products
-      ORDER BY name ASC
-    `);
-
-    if (result[0]) {
-      const loadedProducts: Product[] = result[0].values.map(row => ({
-        id: row[0] as number,
-        name: row[1] as string,
-        barcode: row[2] as string,
-        category: row[3] as string,
-        buy_price: Number(row[4] ?? 0),
-        sell_price: Number(row[5] ?? 0),
-        quantity: Number(row[6] ?? 0),
-        min_stock: Number(row[7] ?? 0),
-        created_at: row[8] as string
-      }));
-      setProducts(loadedProducts);
-    }
+    setProducts(listProducts());
   };
 
   const handleItemFormChange = (field: keyof ItemFormState, value: string) => {

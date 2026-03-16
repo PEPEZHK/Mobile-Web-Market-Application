@@ -1,4 +1,5 @@
 import type { Database } from "sql.js";
+import { resolveProductUnit } from "./units";
 
 export interface SampleProduct {
   name: string;
@@ -183,8 +184,8 @@ export function seedSampleData(database: Database): boolean {
 
     if (!exists) {
       database.run(
-        `INSERT INTO products (name, barcode, category, buy_price, sell_price, quantity, min_stock)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO products (name, barcode, category, buy_price, sell_price, quantity, min_stock, unit)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           product.name,
           product.barcode,
@@ -193,6 +194,7 @@ export function seedSampleData(database: Database): boolean {
           product.sellPrice,
           product.quantity,
           product.minStock,
+          resolveProductUnit(product.category),
         ],
       );
       mutated = true;
@@ -261,11 +263,13 @@ export function seedSampleData(database: Database): boolean {
         }
 
         const lineTotal = item.unitPrice * item.quantity;
+        const product = SAMPLE_PRODUCTS.find((candidate) => candidate.barcode === item.barcode);
+        const unit = resolveProductUnit(product?.category ?? null);
 
         database.run(
-          `INSERT INTO transaction_items (transaction_id, product_id, quantity, unit_price, line_total)
-           VALUES (?, ?, ?, ?, ?)`,
-          [insertedTransactionId, productId, item.quantity, item.unitPrice, lineTotal],
+          `INSERT INTO transaction_items (transaction_id, product_id, quantity, unit, unit_price, line_total)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [insertedTransactionId, productId, item.quantity, unit, item.unitPrice, lineTotal],
         );
 
         database.run(

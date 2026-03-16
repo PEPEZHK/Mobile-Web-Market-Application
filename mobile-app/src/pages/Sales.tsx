@@ -9,7 +9,18 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Textarea } from "@/components/ui/textarea";
-import { getDatabase, logPayment, saveDatabase } from "@/lib/db";
+import {
+  createSaleTransaction,
+  DatabaseOperationError,
+  getCustomerById,
+  getDatabase,
+  getFirstCustomer,
+  listProducts,
+  logPayment,
+  saveDatabase,
+  searchCustomers,
+} from "@/lib/db";
+import { formatQuantityWithUnit, getQuantityInputStep, getQuantityStep } from "@/lib/units";
 import { Product, Customer, CartItem } from "@/types";
 import { Plus, Trash2, ShoppingCart, Search, ChevronsUpDown, UserPlus } from "lucide-react";
 import { toast } from "sonner";
@@ -18,17 +29,22 @@ import { useTranslation } from "@/hooks/useTranslation";
 import { formatCurrency } from "@/lib/utils";
 import { syncMonthlyRestockFromDepot } from "@/lib/shopping";
 
+const STOCK_EPSILON = 0.000001;
+
 export default function Sales() {
   const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customerResults, setCustomerResults] = useState<Customer[]>([]);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [hasCustomers, setHasCustomers] = useState(false);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [isProductDialogOpen, setIsProductDialogOpen] = useState(false);
   const [productSearchQuery, setProductSearchQuery] = useState("");
+  const [customerSearchQuery, setCustomerSearchQuery] = useState("");
   const [cartSearchQuery, setCartSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState<"item" | "category">("item");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const [saleType, setSaleType] = useState<'fully_paid' | 'debt'>('debt');
+  const [saleType, setSaleType] = useState<"fully_paid" | "debt">("debt");
   const [salesSummary, setSalesSummary] = useState({ total: 0, paid: 0, debt: 0 });
   const [customerSummary, setCustomerSummary] = useState({ total: 0, paid: 0, debt: 0 });
   const [isCustomerPickerOpen, setIsCustomerPickerOpen] = useState(false);
@@ -36,87 +52,11 @@ export default function Sales() {
   const [newCustomerForm, setNewCustomerForm] = useState({ name: "", phone: "", notes: "" });
   const { t } = useTranslation();
 
-  const loadData = useCallback((nextSelectedCustomerId?: string | null) => {
-    const db = getDatabase();
+  const loadCustomerResults = useCallback((query: string) => {
+    setCustomerResults(searchCustomers(query, 50));
+  }, []);
 
-    const prodResult = db.exec('SELECT * FROM products WHERE quantity > 0 ORDER BY name');
-    if (prodResult[0]) {
-      const prods = prodResult[0].values.map((row) => ({
-        id: row[0] as number,
-        name: row[1] as string,
-        barcode: row[2] as string,
-        category: row[3] as string,
-        buy_price: row[4] as number,
-        sell_price: row[5] as number,
-        quantity: row[6] as number,
-        min_stock: row[7] as number,
-        created_at: row[8] as string,
-      }));
-      setProducts(prods);
-    }
-
-    let resolvedCustomerId: string | null = null;
-    const custResult = db.exec('SELECT * FROM customers ORDER BY name');
-    if (custResult[0]) {
-      const custs = custResult[0].values.map((row) => ({
-        id: row[0] as number,
-        name: row[1] as string,
-        phone: row[2] as string,
-        notes: row[3] as string,
-        created_at: row[4] as string,
-      }));
-      setCustomers(custs);
-      const desiredCustomerId = nextSelectedCustomerId ?? selectedCustomerId;
-      if (custs.length > 0) {
-        const matchingCustomer = desiredCustomerId && custs.find(c => c.id === parseInt(desiredCustomerId, 10));
-        const chosenCustomer = matchingCustomer ?? custs[0];
-        resolvedCustomerId = chosenCustomer.id.toString();
-        setSelectedCustomerId(resolvedCustomerId);
-      } else {
-        setSelectedCustomerId(null);
-      }
-    } else {
-      setCustomers([]);
-      setSelectedCustomerId(null);
-    }
-
-    updateSalesSummary(db);
-    updateCustomerSales(resolvedCustomerId, db);
-  }, [selectedCustomerId]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  useEffect(() => {
-    updateCustomerSales(selectedCustomerId);
-  }, [selectedCustomerId, saleType]);
-
-  useEffect(() => {
-    if (searchMode === "item" && selectedCategory) {
-      setSelectedCategory(null);
-    }
-  }, [searchMode, selectedCategory]);
-
-  const categories = useMemo(() => {
-    const unique = new Set<string>();
-    products.forEach((p) => unique.add((p.category ?? "").trim()));
-    return Array.from(unique).sort((a, b) => a.localeCompare(b));
-  }, [products]);
-
-  const categorySummaries = useMemo(() => {
-    const counts = new Map<string, number>();
-    products.forEach((p) => {
-      const key = (p.category ?? "").trim();
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    });
-    return categories.map((category) => ({
-      category,
-      count: counts.get(category) ?? 0,
-    }));
-  }, [categories, products]);
-
-  const updateSalesSummary = (database?: Database) => {
+  const updateSalesSummary = useCallback((database?: Database) => {
     const db = database ?? getDatabase();
     const summaryResult = db.exec(`
       SELECT
@@ -132,23 +72,26 @@ export default function Sales() {
     } else {
       setSalesSummary({ total: 0, paid: 0, debt: 0 });
     }
-  };
+  }, []);
 
-  const updateCustomerSales = (customerId: string | null, database?: Database) => {
+  const updateCustomerSales = useCallback((customerId: string | null, database?: Database) => {
     if (!customerId) {
       setCustomerSummary({ total: 0, paid: 0, debt: 0 });
       return;
     }
 
     const db = database ?? getDatabase();
-    const result = db.exec(`
-      SELECT
-        COALESCE(SUM(total_amount), 0) as total,
-        COALESCE(SUM(paid_amount), 0) as paid,
-        COALESCE(SUM(total_amount - paid_amount), 0) as debt
-      FROM transactions
-      WHERE customer_id = ?
-    `, [parseInt(customerId, 10)]);
+    const result = db.exec(
+      `
+        SELECT
+          COALESCE(SUM(total_amount), 0) as total,
+          COALESCE(SUM(paid_amount), 0) as paid,
+          COALESCE(SUM(total_amount - paid_amount), 0) as debt
+        FROM transactions
+        WHERE customer_id = ?
+      `,
+      [Number.parseInt(customerId, 10)],
+    );
 
     if (result[0]) {
       const [total, paid, debt] = result[0].values[0] as number[];
@@ -156,7 +99,65 @@ export default function Sales() {
     } else {
       setCustomerSummary({ total: 0, paid: 0, debt: 0 });
     }
-  };
+  }, []);
+
+  const loadData = useCallback((nextSelectedCustomerId?: string | null) => {
+    const db = getDatabase();
+    setProducts(listProducts({ inStockOnly: true }));
+
+    const fallbackCustomer = getFirstCustomer();
+    const desiredCustomerId = nextSelectedCustomerId ?? selectedCustomerId;
+    const resolvedCustomer = desiredCustomerId
+      ? getCustomerById(Number.parseInt(desiredCustomerId, 10))
+      : fallbackCustomer;
+
+    setHasCustomers(Boolean(fallbackCustomer));
+    setSelectedCustomer(resolvedCustomer ?? null);
+    setSelectedCustomerId(resolvedCustomer ? resolvedCustomer.id.toString() : null);
+    updateSalesSummary(db);
+    updateCustomerSales(resolvedCustomer ? resolvedCustomer.id.toString() : null, db);
+    loadCustomerResults(customerSearchQuery);
+  }, [customerSearchQuery, loadCustomerResults, selectedCustomerId, updateCustomerSales, updateSalesSummary]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    if (!selectedCustomerId && saleType === "debt") {
+      setSaleType("fully_paid");
+    }
+  }, [saleType, selectedCustomerId]);
+
+  useEffect(() => {
+    if (isCustomerPickerOpen) {
+      loadCustomerResults(customerSearchQuery);
+    }
+  }, [customerSearchQuery, isCustomerPickerOpen, loadCustomerResults]);
+
+  useEffect(() => {
+    if (searchMode === "item" && selectedCategory) {
+      setSelectedCategory(null);
+    }
+  }, [searchMode, selectedCategory]);
+
+  const categories = useMemo(() => {
+    const unique = new Set<string>();
+    products.forEach((product) => unique.add((product.category ?? "").trim()));
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [products]);
+
+  const categorySummaries = useMemo(() => {
+    const counts = new Map<string, number>();
+    products.forEach((product) => {
+      const key = (product.category ?? "").trim();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+    return categories.map((category) => ({
+      category,
+      count: counts.get(category) ?? 0,
+    }));
+  }, [categories, products]);
 
   const resolveItemUnitPrice = (item: CartItem) => {
     const candidate = Number(item.unitPrice);
@@ -164,45 +165,69 @@ export default function Sales() {
   };
 
   const addToCart = (product: Product) => {
-    const existing = cart.find(item => item.product.id === product.id);
+    const existing = cart.find((item) => item.product.id === product.id);
     if (existing) {
-      if (existing.quantity >= product.quantity) {
+      const nextQuantity = existing.quantity + getQuantityStep(product.unit);
+      if (nextQuantity - product.quantity > STOCK_EPSILON) {
         toast.error(t("sales.toast.noStock"));
         return;
       }
-      setCart(cart.map(item => 
-        item.product.id === product.id 
-          ? { ...item, quantity: item.quantity + 1 }
-          : item
-      ));
+      setCart(
+        cart.map((item) =>
+          item.product.id === product.id
+            ? {
+                ...item,
+                quantity: product.unit === "metr"
+                  ? Math.round(nextQuantity * 100) / 100
+                  : Math.round(nextQuantity),
+              }
+            : item,
+        ),
+      );
     } else {
-      setCart([...cart, { product, quantity: 1, unitPrice: product.sell_price }]);
+      const initialQuantity = product.unit === "metr" ? Math.min(product.quantity, 1) : 1;
+      if (initialQuantity <= 0) {
+        toast.error(t("sales.toast.noStock"));
+        return;
+      }
+      setCart([...cart, { product, quantity: initialQuantity, unitPrice: product.sell_price }]);
     }
+
     setIsProductDialogOpen(false);
     toast.success(t("sales.toast.added"));
   };
 
   const removeFromCart = (productId: number) => {
-    setCart(cart.filter(item => item.product.id !== productId));
+    setCart(cart.filter((item) => item.product.id !== productId));
   };
 
   const updateCartQuantity = (productId: number, quantity: number) => {
-    if (quantity <= 0) {
+    const product = products.find((entry) => entry.id === productId);
+    if (!product) {
+      return;
+    }
+
+    const normalizedQuantity = product.unit === "metr"
+      ? Math.round(quantity * 100) / 100
+      : Math.round(quantity);
+
+    if (!Number.isFinite(normalizedQuantity) || normalizedQuantity <= 0) {
       removeFromCart(productId);
       return;
     }
-    
-    const product = products.find(p => p.id === productId);
-    if (product && quantity > product.quantity) {
+
+    if (normalizedQuantity - product.quantity > STOCK_EPSILON) {
       toast.error(t("sales.toast.noStock"));
       return;
     }
 
-    setCart(cart.map(item => 
-      item.product.id === productId 
-        ? { ...item, quantity }
-        : item
-    ));
+    setCart(
+      cart.map((item) =>
+        item.product.id === productId
+          ? { ...item, quantity: normalizedQuantity }
+          : item,
+      ),
+    );
   };
 
   const calculateTotal = () => {
@@ -214,25 +239,30 @@ export default function Sales() {
       toast.error(t("sales.toast.invalidPrice", { defaultValue: "Enter a valid price" }));
       return;
     }
-    setCart(cart.map(item =>
-      item.product.id === productId
-        ? { ...item, unitPrice: price }
-        : item
-    ));
+    setCart(
+      cart.map((item) =>
+        item.product.id === productId
+          ? { ...item, unitPrice: price }
+          : item,
+      ),
+    );
   };
 
-  const handleNewCustomerFieldChange = (
-    field: 'name' | 'phone' | 'notes'
-  ) => (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    setNewCustomerForm(prev => ({
-      ...prev,
-      [field]: event.target.value,
-    }));
-  };
+  const handleNewCustomerFieldChange =
+    (field: "name" | "phone" | "notes") =>
+    (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      setNewCustomerForm((prev) => ({
+        ...prev,
+        [field]: event.target.value,
+      }));
+    };
 
   const handleSelectCustomer = (customerId: number) => {
-    setSelectedCustomerId(customerId.toString());
+    const customer = getCustomerById(customerId);
+    setSelectedCustomer(customer);
+    setSelectedCustomerId(customer ? customer.id.toString() : null);
     setIsCustomerPickerOpen(false);
+    updateCustomerSales(customer ? customer.id.toString() : null);
   };
 
   const handleOpenNewCustomerDialog = () => {
@@ -254,21 +284,22 @@ export default function Sales() {
     const db = getDatabase();
     try {
       db.run(
-        'INSERT INTO customers (name, phone, notes) VALUES (?, ?, ?)',
+        "INSERT INTO customers (name, phone, notes) VALUES (?, ?, ?)",
         [
           newCustomerForm.name.trim(),
           newCustomerForm.phone.trim() || null,
           newCustomerForm.notes.trim() || null,
-        ]
+        ],
       );
 
-      const result = db.exec('SELECT last_insert_rowid() as id');
-      const newCustomerId = result[0].values[0][0] as number;
+      const result = db.exec("SELECT last_insert_rowid() as id");
+      const newCustomerId = Number(result[0]?.values?.[0]?.[0] ?? 0);
 
       saveDatabase();
       toast.success(t("sales.toast.created"));
 
       setIsNewCustomerDialogOpen(false);
+      setCustomerSearchQuery("");
       resetNewCustomerForm();
       loadData(newCustomerId.toString());
     } catch (error) {
@@ -289,56 +320,34 @@ export default function Sales() {
       return;
     }
 
-    const db = getDatabase();
-    const total = calculateTotal();
-    const customerId = parseInt(selectedCustomerId, 10);
-    const customerIdForReload = selectedCustomerId;
-
     try {
-      const paidAmount = saleType === 'fully_paid' ? total : 0;
-      db.run(
-        'INSERT INTO transactions (customer_id, total_amount, payment_status, paid_amount) VALUES (?, ?, ?, ?)',
-        [customerId, total, saleType, paidAmount]
-      );
-
-      const result = db.exec('SELECT last_insert_rowid() as id');
-      const transactionId = result[0].values[0][0] as number;
-
-      if (paidAmount > 0) {
-        logPayment(
-          transactionId,
-          paidAmount,
-          saleType === 'fully_paid'
-            ? 'Sale paid in full'
-            : 'Initial payment at sale'
-        );
-      }
-
-      cart.forEach(item => {
-        const unitPrice = resolveItemUnitPrice(item);
-        const lineTotal = unitPrice * item.quantity;
-        
-        db.run(
-          'INSERT INTO transaction_items (transaction_id, product_id, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?)',
-          [transactionId, item.product.id, item.quantity, unitPrice, lineTotal]
-        );
-        
-        db.run(
-          'UPDATE products SET quantity = quantity - ? WHERE id = ?',
-          [item.quantity, item.product.id]
-        );
+      const transactionId = createSaleTransaction({
+        customerId: Number.parseInt(selectedCustomerId, 10),
+        paymentStatus: saleType,
+        items: cart.map((item) => ({
+          productId: item.product.id,
+          quantity: item.quantity,
+          unitPrice: resolveItemUnitPrice(item),
+        })),
       });
 
-      syncMonthlyRestockFromDepot(db);
+      if (saleType === "fully_paid") {
+        logPayment(transactionId, calculateTotal(), "Sale paid in full");
+      }
 
+      syncMonthlyRestockFromDepot(getDatabase());
       saveDatabase();
       toast.success(t("sales.toast.completed"));
 
       setCart([]);
-      setSaleType('fully_paid');
-      loadData(customerIdForReload);
+      setSaleType("fully_paid");
+      loadData(selectedCustomerId);
     } catch (error) {
-      toast.error(t("sales.toast.failed"));
+      if (error instanceof DatabaseOperationError && error.code === "insufficient_stock") {
+        toast.error(t("sales.toast.noStock"));
+      } else {
+        toast.error(t("sales.toast.failed"));
+      }
       console.error(error);
     }
   };
@@ -346,7 +355,9 @@ export default function Sales() {
   const normalizedProductQuery = productSearchQuery.trim().toLowerCase();
   const filteredCategories = useMemo(() => {
     return categorySummaries.filter(({ category }) => {
-      if (!normalizedProductQuery) return true;
+      if (!normalizedProductQuery) {
+        return true;
+      }
       const label = (category || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" })).toLowerCase();
       return label.includes(normalizedProductQuery);
     });
@@ -359,10 +370,10 @@ export default function Sales() {
     ? (selectedCategory ?? matchedCategoryFromQuery)
     : null;
 
-  const filteredProducts = products.filter((p) => {
-    const nameValue = (p.name ?? "").toLowerCase();
-    const barcodeValue = (p.barcode ?? "").toLowerCase();
-    const categoryValue = (p.category ?? "").trim();
+  const filteredProducts = products.filter((product) => {
+    const nameValue = (product.name ?? "").toLowerCase();
+    const barcodeValue = (product.barcode ?? "").toLowerCase();
+    const categoryValue = (product.category ?? "").trim();
     const categoryValueLower = categoryValue.toLowerCase();
 
     const nameMatch = nameValue.includes(normalizedProductQuery);
@@ -383,23 +394,19 @@ export default function Sales() {
       return nameMatch || barcodeMatch || categoryMatch;
     }
 
-    // item search
     if (!normalizedProductQuery) {
       return true;
     }
+
     return nameMatch || barcodeMatch;
   });
 
-  const visibleCartItems = cart.filter(item =>
+  const visibleCartItems = cart.filter((item) =>
     cartSearchQuery.trim() === ""
       ? true
       : item.product.name.toLowerCase().includes(cartSearchQuery.toLowerCase()) ||
-        item.product.barcode?.toLowerCase().includes(cartSearchQuery.toLowerCase())
+        item.product.barcode?.toLowerCase().includes(cartSearchQuery.toLowerCase()),
   );
-
-  const selectedCustomer = selectedCustomerId
-    ? customers.find(c => c.id === parseInt(selectedCustomerId, 10))
-    : null;
 
   return (
     <Layout title={t("sales.title")}>
@@ -435,29 +442,37 @@ export default function Sales() {
                   role="combobox"
                   className="w-full justify-between"
                 >
-                  {selectedCustomer ? selectedCustomer.name : customers.length === 0 ? t("sales.customer.none") : t("sales.customer.select")}
+                  {selectedCustomer
+                    ? selectedCustomer.name
+                    : !hasCustomers
+                      ? t("sales.customer.none")
+                      : t("sales.customer.select")}
                   <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="p-0 w-[280px] sm:w-[320px]" align="start">
-                <Command>
-                  <CommandInput placeholder={t("customers.search")} />
+                <Command shouldFilter={false}>
+                  <CommandInput
+                    placeholder={t("customers.search")}
+                    value={customerSearchQuery}
+                    onValueChange={setCustomerSearchQuery}
+                  />
                   <CommandList>
                     <CommandEmpty>
                       <div className="p-4 space-y-3 text-center text-sm text-muted-foreground">
                         <p>{t("sales.customer.none")}</p>
-                        <Button size="sm" onMouseDown={(e) => e.preventDefault()} onClick={handleOpenNewCustomerDialog}>
+                        <Button size="sm" onMouseDown={(event) => event.preventDefault()} onClick={handleOpenNewCustomerDialog}>
                           <UserPlus className="mr-2 h-4 w-4" />
                           {t("sales.customer.new")}
                         </Button>
                       </div>
                     </CommandEmpty>
                     <CommandGroup heading={t("customers.title")}>
-                      {customers.map(customer => (
+                      {customerResults.map((customer) => (
                         <CommandItem
                           key={customer.id}
-                          value={customer.id.toString()}
-                          onSelect={(value) => handleSelectCustomer(parseInt(value, 10))}
+                          value={`${customer.name} ${customer.phone ?? ""}`}
+                          onSelect={() => handleSelectCustomer(customer.id)}
                         >
                           <div>
                             <div className="font-medium">{customer.name}</div>
@@ -478,25 +493,27 @@ export default function Sales() {
                 </Command>
               </PopoverContent>
             </Popover>
-            {customers.length === 0 && (
+            {!hasCustomers && (
               <p className="text-xs text-destructive">
                 {t("sales.toast.customerRequired")}
               </p>
             )}
-            {customers.length === 0 && (
+            {!hasCustomers && (
               <Button size="sm" variant="outline" onClick={handleOpenNewCustomerDialog}>
                 <UserPlus className="mr-2 h-4 w-4" />
                 {t("sales.customer.new")}
               </Button>
             )}
             {selectedCustomer?.phone && (
-              <p className="text-xs text-muted-foreground">{t("sales.newCustomer.phone")}: {selectedCustomer.phone}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("sales.newCustomer.phone")}: {selectedCustomer.phone}
+              </p>
             )}
           </div>
 
           <div>
             <Label className="text-sm text-muted-foreground mb-2 block">{t("sales.saleType")}</Label>
-            <Select value={saleType} onValueChange={(value) => setSaleType(value as 'fully_paid' | 'debt')}>
+            <Select value={saleType} onValueChange={(value) => setSaleType(value as "fully_paid" | "debt")}>
               <SelectTrigger>
                 <SelectValue placeholder={t("sales.saleType")} />
               </SelectTrigger>
@@ -505,7 +522,7 @@ export default function Sales() {
                 <SelectItem value="debt" disabled={!selectedCustomerId}>{t("sales.saleType.debt")}</SelectItem>
               </SelectContent>
             </Select>
-            {saleType === 'debt' && (
+            {saleType === "debt" && (
               <p className="text-xs text-muted-foreground mt-2">
                 {t("sales.debtNote", { defaultValue: "Debt sales require assigning a customer and will be tracked until fully paid." })}
               </p>
@@ -515,7 +532,9 @@ export default function Sales() {
           {selectedCustomer && (
             <div className="grid gap-3 sm:grid-cols-3">
               <Card className="p-3">
-                <div className="text-xs text-muted-foreground">{t("sales.customerTotal", { defaultValue: `${selectedCustomer.name}'s Total`, values: { name: selectedCustomer.name } })}</div>
+                <div className="text-xs text-muted-foreground">
+                  {t("sales.customerTotal", { defaultValue: `${selectedCustomer.name}'s Total`, values: { name: selectedCustomer.name } })}
+                </div>
                 <div className="text-lg font-semibold mt-1">
                   {formatCurrency(customerSummary.total)}
                 </div>
@@ -555,7 +574,7 @@ export default function Sales() {
                 <Input
                   id="new-customer-name"
                   value={newCustomerForm.name}
-                  onChange={handleNewCustomerFieldChange('name')}
+                  onChange={handleNewCustomerFieldChange("name")}
                   required
                   autoFocus
                 />
@@ -565,7 +584,7 @@ export default function Sales() {
                 <Input
                   id="new-customer-phone"
                   value={newCustomerForm.phone}
-                  onChange={handleNewCustomerFieldChange('phone')}
+                  onChange={handleNewCustomerFieldChange("phone")}
                   type="tel"
                 />
               </div>
@@ -574,7 +593,7 @@ export default function Sales() {
                 <Textarea
                   id="new-customer-notes"
                   value={newCustomerForm.notes}
-                  onChange={handleNewCustomerFieldChange('notes')}
+                  onChange={handleNewCustomerFieldChange("notes")}
                   rows={3}
                 />
               </div>
@@ -607,11 +626,11 @@ export default function Sales() {
               <Input
                 placeholder={t("sales.searchProducts")}
                 value={productSearchQuery}
-                onChange={(e) => setProductSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (searchMode === "category" && !activeCategory && e.key === "Enter" && filteredCategories.length > 0) {
+                onChange={(event) => setProductSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (searchMode === "category" && !activeCategory && event.key === "Enter" && filteredCategories.length > 0) {
                     setSelectedCategory(filteredCategories[0].category);
-                    e.preventDefault();
+                    event.preventDefault();
                   }
                 }}
                 className="flex-1"
@@ -663,8 +682,8 @@ export default function Sales() {
                       {t("sales.filteredCategory", {
                         defaultValue: "Showing category: {category}",
                         values: {
-                          category: activeCategory || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" })
-                        }
+                          category: activeCategory || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" }),
+                        },
                       })}
                     </p>
                   ) : (
@@ -683,7 +702,7 @@ export default function Sales() {
                     {t("sales.clearFilters", { defaultValue: "Clear" })}
                   </Button>
                 </div>
-                {filteredProducts.map(product => (
+                {filteredProducts.map((product) => (
                   <Card
                     key={product.id}
                     className="p-3 cursor-pointer hover:bg-muted transition-colors"
@@ -696,9 +715,9 @@ export default function Sales() {
                           {t("depot.form.category")}: {product.category || t("depot.filter.uncategorized", { defaultValue: "Uncategorized" })}
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          {t("depot.form.quantity")}: {product.quantity} | {t("sales.unitPrice", {
+                          {t("depot.form.quantity")}: {formatQuantityWithUnit(product.quantity, product.unit, t)} | {t("sales.unitPrice", {
                             defaultValue: "{price} each",
-                            values: { price: formatCurrency(product.sell_price) }
+                            values: { price: formatCurrency(product.sell_price) },
                           })}
                         </div>
                       </div>
@@ -722,12 +741,12 @@ export default function Sales() {
             <Input
               placeholder={t("sales.cartSearch")}
               value={cartSearchQuery}
-              onChange={(e) => setCartSearchQuery(e.target.value)}
+              onChange={(event) => setCartSearchQuery(event.target.value)}
               className="pl-9"
             />
           </div>
 
-          {visibleCartItems.map(item => (
+          {visibleCartItems.map((item) => (
             <Card key={item.product.id} className="p-4">
               <div className="flex justify-between items-start mb-3">
                 <div className="flex-1">
@@ -735,8 +754,11 @@ export default function Sales() {
                   <p className="text-sm text-muted-foreground">
                     {t("sales.unitPrice", {
                       defaultValue: `${formatCurrency(resolveItemUnitPrice(item))} each`,
-                      values: { price: formatCurrency(resolveItemUnitPrice(item)) }
+                      values: { price: formatCurrency(resolveItemUnitPrice(item)) },
                     })}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {t("depot.form.quantity")}: {formatQuantityWithUnit(item.product.quantity, item.product.unit, t)}
                   </p>
                 </div>
                 <Button
@@ -752,25 +774,29 @@ export default function Sales() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => updateCartQuantity(item.product.id, item.quantity - 1)}
+                    onClick={() => updateCartQuantity(item.product.id, item.quantity - getQuantityStep(item.product.unit))}
                   >
                     -
                   </Button>
                   <Input
                     type="number"
                     value={item.quantity}
-                    onChange={(e) => updateCartQuantity(item.product.id, parseInt(e.target.value) || 0)}
+                    onChange={(event) => updateCartQuantity(item.product.id, Number(event.target.value) || 0)}
                     className="w-20 text-center"
-                    min="1"
+                    min={item.product.unit === "metr" ? "0.01" : "1"}
                     max={item.product.quantity}
+                    step={getQuantityInputStep(item.product.unit)}
                   />
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => updateCartQuantity(item.product.id, item.quantity + 1)}
+                    onClick={() => updateCartQuantity(item.product.id, item.quantity + getQuantityStep(item.product.unit))}
                   >
                     +
                   </Button>
+                  <span className="text-xs text-muted-foreground">
+                    {formatQuantityWithUnit(item.quantity, item.product.unit, t, "short")}
+                  </span>
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -780,7 +806,7 @@ export default function Sales() {
                     step="0.01"
                     min="0"
                     value={resolveItemUnitPrice(item)}
-                    onChange={(e) => updateCartPrice(item.product.id, parseFloat(e.target.value))}
+                    onChange={(event) => updateCartPrice(item.product.id, parseFloat(event.target.value))}
                     className="w-24 text-center"
                   />
                 </div>
@@ -824,5 +850,3 @@ export default function Sales() {
     </Layout>
   );
 }
-
-
